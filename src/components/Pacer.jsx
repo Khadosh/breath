@@ -320,12 +320,6 @@ export default function Pacer() {
   const ratioDots = mode.phases.map((p) => `${p.secs}s`).join(" · ");
   const ratioSlash = mode.phases.map((p) => `${p.secs}s`).join(" / ");
 
-  // — label anterior para el crossfade Inhalá→Exhalá —
-  const labelHist = useRef({ cur: phase.label, prev: null });
-  if (labelHist.current.cur !== phase.label) {
-    labelHist.current = { cur: phase.label, prev: labelHist.current.cur };
-  }
-  const ghostLabel = running ? labelHist.current.prev : null;
 
   const pickMode = (m, ev) => {
     setModeId(m.id);
@@ -369,11 +363,11 @@ export default function Pacer() {
         .sub{ font-size:13px; color:#CBD8D2; letter-spacing:.02em;
           margin:10px 0 0; text-align:center; min-height:18px; }
         .stage{ position:relative; width:100%; flex:1; min-height:0;
-          --disc:min(320px, 42dvh, 70vw); }
+          --disc:min(340px, 44dvh, 76vw); }
         .layer{ position:absolute; top:50%; left:50%;
           transform:translate(-50%,-50%); pointer-events:none; }
         .wave{ width:684px; height:200px; opacity:.38; }
-        .halo{ width:calc(var(--disc)*1.45); aspect-ratio:1; border-radius:50%;
+        .halo{ width:calc(var(--disc)*1.5); aspect-ratio:1; border-radius:50%;
           background:radial-gradient(circle, rgba(214,112,60,.44), rgba(214,112,60,.14) 48%, transparent 72%);
           filter:blur(4px); transform:translate(-50%,-50%) scale(.72); will-change:transform; }
         .ring-svg{ width:calc(var(--disc)*1.58); aspect-ratio:1; }
@@ -389,18 +383,12 @@ export default function Pacer() {
         .center{ position:absolute; inset:0; display:flex; flex-direction:column;
           align-items:center; justify-content:center; pointer-events:none; text-align:center;
           transform:translateY(calc(var(--disc)*0.045)); }
-        .phase-wrap{ position:relative; display:grid; place-items:center; }
         .phase{ font-family:'Fraunces',serif; font-weight:500;
-          font-size:clamp(26px, calc(var(--disc)*0.22), 44px);
+          font-size:clamp(26px, calc(var(--disc)*0.22), 48px);
           text-transform:uppercase; letter-spacing:.06em; color:#F6F3ED; line-height:1;
-          text-shadow:0 2px 18px rgba(0,0,0,.35); grid-area:1/1; white-space:nowrap; }
-        .phase-in{ animation:phaseIn .55s ease-out both; }
-        .phase-out{ animation:phaseOut .45s ease-in both; }
-        @keyframes phaseIn{ from{ opacity:0; transform:translateY(9px); } to{ opacity:1; transform:none; } }
-        @keyframes phaseOut{ from{ opacity:1; transform:none; } to{ opacity:0; transform:translateY(-9px); } }
-        @media (prefers-reduced-motion: reduce){
-          .phase-in,.phase-out{ animation-duration:.01s; }
-        }
+          text-shadow:0 2px 18px rgba(0,0,0,.35); white-space:nowrap;
+          animation:phaseIn .28s ease-out both; }
+        @keyframes phaseIn{ from{ opacity:0; } to{ opacity:1; } }
         .count{ font-size:14px; color:#CBD3DC; margin-top:11px; letter-spacing:.14em; }
         .done-txt{ font-family:'Fraunces',serif; font-size:28px; letter-spacing:.08em;
           text-transform:uppercase; color:var(--mint); }
@@ -464,6 +452,16 @@ export default function Pacer() {
         @media (max-height:640px){
           .sub{ display:none; }
         }
+        @media (min-height:800px){
+          .mode-btn{ font-size:15px; padding:10px 17px; }
+          .sub{ font-size:14px; margin-top:14px; }
+          .count{ font-size:15px; }
+          .panel{ padding:17px 18px 12px; border-radius:26px; }
+          .play{ padding:18px 18px; }
+          .icon-circle{ width:48px; height:48px; }
+          .meta .val{ font-size:14.5px; }
+          .wave{ opacity:.42; }
+        }
       `}</style>
 
       <div ref={modesEl} className="modes-scroll" role="group" aria-label="Modos de respiración">
@@ -494,13 +492,7 @@ export default function Pacer() {
             <div className="done-txt">Listo</div>
           ) : (
             <>
-              <div className="phase-wrap">
-                <div className="phase phase-in" key={`${phaseIdx}-${phase.label}`}>{phase.label}</div>
-                {ghostLabel && (
-                  <div className="phase phase-out" aria-hidden="true"
-                    key={`ghost-${phaseIdx}`}>{ghostLabel}</div>
-                )}
-              </div>
+              <div className="phase" key={`${phaseIdx}-${phase.label}`}>{phase.label}</div>
               <div className="count">{running ? `${counter}s` : ratioDots}</div>
             </>
           )}
