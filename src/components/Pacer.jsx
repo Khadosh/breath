@@ -1,12 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 
-// — Modos: cada uno es una secuencia de fases. hold con secs 0 se saltea. —
+// — Modos: cada uno es una secuencia de fases. —
 const MODES = [
   {
     id: "resonancia",
     name: "Resonancia",
-    goal: "Base · tono vagal, HRV",
-    ratio: "5,5 · 5,5",
+    sub: "Configuración de Base: Tono Vagal, HRV",
     defaultMin: 10,
     phases: [
       { key: "inhale", label: "Inhalá", secs: 5.5 },
@@ -16,8 +15,7 @@ const MODES = [
   {
     id: "calma",
     name: "Calma",
-    goal: "Reset cuando saltó el estrés",
-    ratio: "4 · 6",
+    sub: "Reset Rápido: Baja el Estrés Agudo",
     defaultMin: 3,
     phases: [
       { key: "inhale", label: "Inhalá", secs: 4 },
@@ -27,8 +25,7 @@ const MODES = [
   {
     id: "dormir",
     name: "Dormir",
-    goal: "Pre-sueño · baja cortisol",
-    ratio: "4 · 7 · 8",
+    sub: "Pre-Sueño: 4-7-8, Baja Cortisol",
     defaultMin: 5,
     phases: [
       { key: "inhale", label: "Inhalá", secs: 4 },
@@ -39,8 +36,7 @@ const MODES = [
   {
     id: "foco",
     name: "Foco",
-    goal: "Antes de algo demandante",
-    ratio: "4 · 4 · 4 · 4",
+    sub: "Box Breathing: Claridad Mental",
     defaultMin: 4,
     phases: [
       { key: "inhale", label: "Inhalá", secs: 4 },
@@ -52,8 +48,7 @@ const MODES = [
   {
     id: "energia",
     name: "Energía",
-    goal: "Activación suave · no es Wim Hof",
-    ratio: "4 · 2 · 4",
+    sub: "Activación Suave: Sin Ansiedad",
     defaultMin: 3,
     phases: [
       { key: "inhale", label: "Inhalá", secs: 4 },
@@ -70,13 +65,26 @@ const fmt = (s) => {
   return `${m}:${r.toString().padStart(2, "0")}`;
 };
 
-const R = 132; // radio del anillo
+// — onda decorativa: dos ráfagas de sinusoide con envolvente gaussiana —
+const WAVE_PATH = (() => {
+  let d = "M0 100";
+  for (let x = 4; x <= 684; x += 4) {
+    const g1 = Math.exp(-((x - 95) ** 2) / (2 * 55 ** 2));
+    const g2 = Math.exp(-((x - 589) ** 2) / (2 * 55 ** 2));
+    const y = 100 - Math.sin(x / 9) * 46 * (g1 + g2);
+    d += ` L${x} ${y.toFixed(1)}`;
+  }
+  return d;
+})();
+
+const R = 158; // radio del arco de progreso (viewBox 400)
 const CIRC = 2 * Math.PI * R;
 
 export default function Pacer() {
   const [modeId, setModeId] = useState("resonancia");
   const [running, setRunning] = useState(false);
-  const [sound, setSound] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [volume, setVolume] = useState(0.5);
   const [phaseIdx, setPhaseIdx] = useState(0);
   const [phaseProg, setPhaseProg] = useState(0); // 0..1
   const [remaining, setRemaining] = useState(null); // seg restantes de sesión
@@ -96,9 +104,13 @@ export default function Pacer() {
   const idxRef = useRef(0);
   const sessionEnd = useRef(0);
   const audioCtx = useRef(null);
+  const volRef = useRef(volume);
+  const mutedRef = useRef(muted);
+  volRef.current = volume;
+  mutedRef.current = muted;
 
   const beep = useCallback((kind) => {
-    if (!sound) return;
+    if (mutedRef.current || volRef.current <= 0) return;
     try {
       if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
       const ctx = audioCtx.current;
@@ -108,13 +120,13 @@ export default function Pacer() {
       o.frequency.value = freq;
       o.type = "sine";
       g.gain.setValueAtTime(0.0001, ctx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + 0.04);
+      g.gain.exponentialRampToValueAtTime(0.25 * volRef.current, ctx.currentTime + 0.04);
       g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5);
       o.connect(g).connect(ctx.destination);
       o.start();
       o.stop(ctx.currentTime + 0.5);
     } catch { /* sin audio, seguimos */ }
-  }, [sound]);
+  }, []);
 
   const stop = useCallback(() => {
     cancelAnimationFrame(raf.current);
@@ -176,126 +188,222 @@ export default function Pacer() {
   useEffect(() => () => cancelAnimationFrame(raf.current), []);
   useEffect(() => {
     const onKey = (e) => {
-      if (e.code === "Space") { e.preventDefault(); toggle(); }
+      if (e.code === "Space" && e.target.tagName !== "INPUT") { e.preventDefault(); toggle(); }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [toggle]);
 
   // — escala del disco según fase —
-  let scale = 0.62;
+  let scale = 0.72;
   const k = phase.key;
   const e = easeInOutSine(phaseProg);
-  if (k.startsWith("inhale")) scale = 0.62 + 0.38 * e;
-  else if (k.startsWith("exhale")) scale = 1.0 - 0.38 * e;
+  if (k.startsWith("inhale")) scale = 0.72 + 0.28 * e;
+  else if (k.startsWith("exhale")) scale = 1.0 - 0.28 * e;
   else if (k === "hold") scale = 1.0; // hold tras inhalar
-  else scale = 0.62; // hold2 tras exhalar
-  if (reduced.current) scale = k.startsWith("inhale") ? 0.85 : k.startsWith("exhale") ? 0.68 : (k === "hold" ? 0.85 : 0.68);
-
-  // — punto orbital (signature): recorre el anillo según progreso de fase —
-  const orbitAngle = -90 + phaseProg * 360;
-  const ox = 160 + R * Math.cos((orbitAngle * Math.PI) / 180);
-  const oy = 160 + R * Math.sin((orbitAngle * Math.PI) / 180);
+  else scale = 0.72; // hold2 tras exhalar
+  if (reduced.current) scale = k.startsWith("inhale") ? 0.92 : k.startsWith("exhale") ? 0.76 : (k === "hold" ? 0.92 : 0.76);
 
   const counter = Math.max(1, Math.ceil(phase.secs - phaseProg * phase.secs));
+  const ratioDots = mode.phases.map((p) => `${p.secs}s`).join(" · ");
+  const ratioSlash = mode.phases.map((p) => `${p.secs}s`).join(" / ");
 
   return (
     <div className="pacer-root">
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500&family=Space+Mono:wght@400;700&display=swap');
         .pacer-root{
-          --ink-0:#0B1019; --ink-1:#141E2E; --jade:#8FB9A8; --jade-hi:#AEDAC7;
-          --paper:#ECF1F3; --mist:#6A798C; --cinnabar:#C8553D; --line:rgba(143,185,168,.16);
-          min-height:560px; display:flex; flex-direction:column; align-items:center;
-          background:radial-gradient(120% 90% at 50% 0%, var(--ink-1), var(--ink-0) 70%);
-          color:var(--paper); font-family:system-ui,-apple-system,sans-serif;
-          padding:28px 18px 34px; border-radius:18px; user-select:none;
+          --bg-0:#2A303C; --bg-1:#232833; --panel:#343B49; --pill:#3A4150;
+          --mint:#A9EFD2; --mint-deep:#7FD8B8; --ink:#14241D;
+          --txt:#EFF2F5; --muted:#A0A8B6; --line:rgba(255,255,255,.08);
+          min-height:100dvh; width:100%; overflow:hidden; position:relative;
+          display:flex; flex-direction:column; align-items:center;
+          background:linear-gradient(180deg,var(--bg-0),var(--bg-1) 55%,#20242E);
+          color:var(--txt); font-family:'Space Mono',ui-monospace,monospace;
+          padding:26px 14px calc(18px + env(safe-area-inset-bottom)); user-select:none;
         }
-        .modes{ display:flex; flex-wrap:wrap; gap:7px; justify-content:center; margin-bottom:8px; }
+        .modes-group{ display:flex; background:var(--pill); border-radius:999px;
+          padding:5px; gap:2px; margin-bottom:10px; box-shadow:inset 0 2px 6px rgba(0,0,0,.18); }
         .mode-btn{
-          background:transparent; border:1px solid var(--line); color:var(--mist);
-          font-family:'Space Mono',monospace; font-size:12px; letter-spacing:.04em;
-          padding:7px 13px; border-radius:999px; cursor:pointer; transition:all .25s ease;
+          background:transparent; border:none; color:#A9B1BF;
+          font-family:inherit; font-size:15px; letter-spacing:.02em;
+          padding:9px 17px; border-radius:999px; cursor:pointer; transition:color .2s;
         }
-        .mode-btn:hover{ color:var(--paper); border-color:rgba(143,185,168,.4); }
-        .mode-btn[aria-pressed="true"]{ color:var(--ink-0); background:var(--jade); border-color:var(--jade); }
-        .mode-btn:focus-visible{ outline:2px solid var(--jade-hi); outline-offset:2px; }
-        .goal{ font-family:'Space Mono',monospace; font-size:12px; color:var(--mist);
-          letter-spacing:.04em; margin:6px 0 14px; min-height:16px; }
-        .stage{ position:relative; width:320px; height:320px; }
-        .stage svg{ position:absolute; inset:0; }
-        .disc{ position:absolute; inset:0; margin:auto; width:200px; height:200px; border-radius:50%;
-          background:radial-gradient(circle at 50% 42%, var(--jade-hi), var(--jade) 60%, rgba(143,185,168,.15) 100%);
-          box-shadow:0 0 60px 4px rgba(143,185,168,.22);
+        .mode-btn:hover{ color:var(--txt); }
+        .mode-btn[aria-pressed="true"]{
+          color:var(--mint); background:#20362F;
+          box-shadow:0 0 0 2px #9FE8C9, 0 0 16px rgba(160,235,200,.45);
+        }
+        .mode-btn:focus-visible{ outline:2px solid var(--mint); outline-offset:2px; }
+        .sub{ font-size:14.5px; color:#D9E4DE; letter-spacing:.02em;
+          margin:14px 0 0; text-align:center; min-height:20px; }
+        .stage{ position:relative; width:100%; max-width:460px; height:min(410px, 48dvh);
+          min-height:330px; display:flex; align-items:center; justify-content:center; flex:1; }
+        .wave{ position:absolute; top:50%; left:50%; width:684px; height:200px;
+          transform:translate(-50%,-50%); opacity:.55; pointer-events:none; }
+        .halo{ position:absolute; width:88%; max-width:360px; aspect-ratio:1; border-radius:50%;
+          background:radial-gradient(circle, rgba(219,124,64,.5), rgba(219,124,64,.16) 48%, transparent 72%);
+          filter:blur(4px); transition:transform .12s linear; will-change:transform; }
+        .ring-svg{ position:absolute; width:100%; max-width:410px; aspect-ratio:1; pointer-events:none; }
+        .disc{ position:relative; width:62%; max-width:256px; aspect-ratio:1; border-radius:50%;
+          background:
+            radial-gradient(circle at 50% 28%, rgba(255,255,255,.10), transparent 46%),
+            radial-gradient(circle at 50% 45%, #39414F, #232935 78%);
+          border:4px solid #AFF2D8;
+          box-shadow:
+            0 0 18px rgba(165,240,205,.6), 0 0 60px rgba(165,240,205,.25),
+            inset 0 0 26px rgba(165,240,205,.5), inset 0 16px 34px rgba(255,255,255,.05);
           transition:transform .12s linear; will-change:transform; }
         .center{ position:absolute; inset:0; display:flex; flex-direction:column;
-          align-items:center; justify-content:center; pointer-events:none; }
-        .phase{ font-family:'Fraunces',serif; font-weight:500; font-size:34px;
-          color:var(--ink-0); line-height:1; }
-        .count{ font-family:'Space Mono',monospace; font-size:13px; color:rgba(11,16,25,.62);
-          margin-top:6px; letter-spacing:.1em; }
-        .controls{ display:flex; align-items:center; gap:14px; margin-top:22px; }
-        .play{ font-family:'Space Mono',monospace; font-weight:700; font-size:14px;
-          letter-spacing:.06em; color:var(--ink-0); background:var(--paper); border:none;
-          padding:13px 30px; border-radius:999px; cursor:pointer; transition:transform .12s ease, background .2s; }
+          align-items:center; justify-content:center; pointer-events:none; text-align:center; }
+        .phase{ font-family:'Fraunces',serif; font-weight:500; font-size:clamp(34px,9vw,44px);
+          text-transform:uppercase; letter-spacing:.05em; color:#F6F3ED; line-height:1;
+          text-shadow:0 2px 18px rgba(0,0,0,.35); }
+        .count{ font-size:16px; color:#CBD3DC; margin-top:12px; letter-spacing:.14em; }
+        .done-txt{ font-family:'Fraunces',serif; font-size:30px; letter-spacing:.08em;
+          text-transform:uppercase; color:var(--mint); }
+        .panel{ width:100%; max-width:440px; background:rgba(52,59,73,.88);
+          border-radius:26px; padding:16px 16px 10px; margin-top:10px;
+          box-shadow:0 12px 34px rgba(0,0,0,.28); }
+        .panel-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
+        .icon-col{ display:flex; flex-direction:column; align-items:center; gap:7px;
+          background:none; border:none; color:#C7CDD6; cursor:pointer; padding:0;
+          font-family:inherit; font-size:11px; letter-spacing:.12em; }
+        .icon-col:hover .icon-circle{ background:#454D5E; }
+        .icon-col:focus-visible{ outline:2px solid var(--mint); outline-offset:3px; border-radius:10px; }
+        .icon-circle{ width:46px; height:46px; border-radius:50%; background:#3A4150;
+          display:grid; place-items:center; transition:background .2s; }
+        .play{ display:flex; align-items:center; justify-content:center; gap:8px;
+          font-family:inherit; font-weight:700; font-size:clamp(11px,3.2vw,15px);
+          letter-spacing:.04em; color:var(--ink); border:none; border-radius:999px;
+          background:linear-gradient(180deg,#C4F8E1,#8FE7C4);
+          padding:17px 16px; flex:1; max-width:238px; cursor:pointer; white-space:nowrap;
+          box-shadow:0 6px 24px rgba(150,240,200,.35); transition:transform .12s ease; }
         .play:hover{ transform:translateY(-1px); }
-        .play:focus-visible{ outline:2px solid var(--jade-hi); outline-offset:3px; }
-        .ghost{ background:transparent; border:1px solid var(--line); color:var(--mist);
-          font-family:'Space Mono',monospace; font-size:12px; padding:12px 16px;
-          border-radius:999px; cursor:pointer; transition:all .2s; }
-        .ghost:hover{ color:var(--paper); border-color:rgba(143,185,168,.4); }
-        .ghost:focus-visible{ outline:2px solid var(--jade-hi); outline-offset:2px; }
-        .ghost[aria-pressed="true"]{ color:var(--jade); border-color:var(--jade); }
-        .meta{ display:flex; gap:22px; margin-top:18px; font-family:'Space Mono',monospace;
-          font-size:12px; color:var(--mist); letter-spacing:.05em; }
-        .meta b{ color:var(--paper); font-weight:400; }
-        .done{ font-family:'Fraunces',serif; font-size:18px; color:var(--jade-hi); }
+        .play:focus-visible{ outline:2px solid var(--mint); outline-offset:3px; }
+        .sound-block{ display:flex; flex-direction:column; align-items:center; gap:5px; }
+        .sound-title{ font-size:10.5px; color:#A9B1BF; letter-spacing:.02em;
+          text-align:center; max-width:92px; line-height:1.35; }
+        .sound-row{ display:flex; align-items:center; gap:6px; }
+        .sound-btn{ background:none; border:none; color:#E8ECF0; cursor:pointer; padding:2px;
+          display:grid; place-items:center; }
+        .sound-btn:focus-visible{ outline:2px solid var(--mint); outline-offset:2px; border-radius:6px; }
+        .sound-row input[type=range]{ width:56px; accent-color:var(--mint); cursor:pointer; }
+        .sound-label{ font-size:11px; letter-spacing:.14em; color:#C7CDD6; }
+        .sparkle{ color:var(--mint); font-size:13px; line-height:1; opacity:.85; }
+        .meta{ display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;
+          margin-top:13px; padding:0 4px; font-size:12.5px; color:#A9B1BF; letter-spacing:.02em; }
+        .meta b{ color:var(--txt); font-weight:700; }
+        @media (max-width:380px){
+          .mode-btn{ font-size:13px; padding:8px 12px; }
+          .panel-row{ gap:8px; }
+        }
       `}</style>
 
-      <div className="modes" role="group" aria-label="Modos de respiración">
-        {MODES.map((m) => (
-          <button key={m.id} className="mode-btn" aria-pressed={m.id === modeId}
-            onClick={() => setModeId(m.id)}>{m.name}</button>
-        ))}
+      <div role="group" aria-label="Modos de respiración"
+        style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+        <div className="modes-group">
+          {MODES.slice(0, 4).map((m) => (
+            <button key={m.id} className="mode-btn" aria-pressed={m.id === modeId}
+              onClick={() => setModeId(m.id)}>{m.name}</button>
+          ))}
+        </div>
+        <div className="modes-group">
+          {MODES.slice(4).map((m) => (
+            <button key={m.id} className="mode-btn" aria-pressed={m.id === modeId}
+              onClick={() => setModeId(m.id)}>{m.name}</button>
+          ))}
+        </div>
       </div>
-      <div className="goal">{mode.goal}</div>
+      <div className="sub">{mode.sub}</div>
 
       <div className="stage">
-        <svg viewBox="0 0 320 320" aria-hidden="true">
-          <circle cx="160" cy="160" r={R} fill="none" stroke="var(--line)" strokeWidth="2" />
-          <circle cx="160" cy="160" r={R} fill="none" stroke="var(--jade)" strokeWidth="2.5"
+        <svg className="wave" viewBox="0 0 684 200" aria-hidden="true">
+          <path d={WAVE_PATH} fill="none" stroke="#9BA4B0" strokeWidth="1.6" />
+        </svg>
+        <div className="halo" style={{ transform: `scale(${scale})` }} />
+        <svg className="ring-svg" viewBox="0 0 400 400" aria-hidden="true">
+          <circle cx="200" cy="200" r={R} fill="none" stroke="var(--line)" strokeWidth="1.5" />
+          <circle cx="200" cy="200" r={R} fill="none" stroke="var(--mint)" strokeWidth="2"
             strokeLinecap="round" strokeDasharray={CIRC}
             strokeDashoffset={CIRC * (1 - phaseProg)}
-            transform="rotate(-90 160 160)"
-            style={{ transition: "stroke-dashoffset .12s linear", opacity: running ? 1 : 0.35 }} />
-          {running && <circle cx={ox} cy={oy} r="5" fill="var(--cinnabar)" />}
+            transform="rotate(-90 200 200)"
+            style={{ transition: "stroke-dashoffset .12s linear", opacity: running ? 0.5 : 0 }} />
         </svg>
         <div className="disc" style={{ transform: `scale(${scale})` }} />
         <div className="center">
           {done ? (
-            <div className="done">Listo</div>
+            <div className="done-txt">Listo</div>
           ) : (
             <>
               <div className="phase">{phase.label}</div>
-              <div className="count">{running ? counter : mode.ratio}</div>
+              <div className="count">{running ? `${counter}s` : ratioDots}</div>
             </>
           )}
         </div>
       </div>
 
-      <div className="controls">
-        <button className="play" onClick={toggle}>
-          {running ? "Pausá" : done ? "Otra vez" : "Empezá"}
-        </button>
-        <button className="ghost" onClick={reset} aria-label="Reiniciar sesión">Reiniciar</button>
-        <button className="ghost" aria-pressed={sound} onClick={() => setSound((s) => !s)}>
-          {sound ? "Son ●" : "Son ○"}
-        </button>
-      </div>
+      <div className="panel">
+        <div className="panel-row">
+          <button className="icon-col" onClick={reset} aria-label="Reiniciar sesión">
+            <span className="icon-circle">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                <polyline points="21 3 21 9 15 9" />
+              </svg>
+            </span>
+            REINICIAR
+          </button>
 
-      <div className="meta">
-        <span>Ritmo <b>{mode.ratio}</b></span>
-        <span>Restante <b>{fmt(remaining ?? mode.defaultMin * 60)}</b></span>
+          <button className="play" onClick={toggle}>
+            {running ? (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <rect x="5" y="4" width="5" height="16" rx="1.5" />
+                <rect x="14" y="4" width="5" height="16" rx="1.5" />
+              </svg>
+            ) : (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M7 4.5v15c0 .9 1 1.5 1.8 1l12-7.5c.7-.5.7-1.5 0-2L8.8 3.5C8 3 7 3.6 7 4.5Z" />
+              </svg>
+            )}
+            {running ? "PAUSAR SESIÓN" : done ? "OTRA SESIÓN" : "COMENZAR SESIÓN"}
+          </button>
+
+          <div className="sound-block">
+            <span className="sound-title">Ajustes de Sonido</span>
+            <div className="sound-row">
+              <button className="sound-btn" onClick={() => setMuted((m) => !m)}
+                aria-pressed={muted} aria-label={muted ? "Activar sonido" : "Silenciar"}>
+                <svg width="21" height="21" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M11 5 6.5 8.5H3v7h3.5L11 19V5Z" fill="currentColor" stroke="none" />
+                  {muted ? (
+                    <>
+                      <line x1="15" y1="9" x2="21" y2="15" />
+                      <line x1="21" y1="9" x2="15" y2="15" />
+                    </>
+                  ) : (
+                    <>
+                      <path d="M14.5 9.2a4 4 0 0 1 0 5.6" />
+                      <path d="M17.2 6.8a7.5 7.5 0 0 1 0 10.4" />
+                    </>
+                  )}
+                </svg>
+              </button>
+              <input type="range" min="0" max="1" step="0.05" value={volume}
+                aria-label="Volumen"
+                onChange={(ev) => setVolume(parseFloat(ev.target.value))} />
+            </div>
+            <span className="sound-label">SONIDO</span>
+            <span className="sparkle" aria-hidden="true">✦</span>
+          </div>
+        </div>
+
+        <div className="meta">
+          <span>Ritmo Actual: <b>{ratioSlash}</b></span>
+          <span>Tiempo Restante: <b>{fmt(remaining ?? mode.defaultMin * 60)} Min</b></span>
+        </div>
       </div>
     </div>
   );
