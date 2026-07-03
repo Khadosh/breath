@@ -94,11 +94,21 @@ const CIRC = 2 * Math.PI * R;
 const isStandalone = () =>
   window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone;
 
+// localStorage puede fallar (modo privado, etc.): nunca es fatal
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* sin persistencia */ } };
+
 export default function Pacer() {
-  const [modeId, setModeId] = useState("resonancia");
+  const [modeId, setModeId] = useState(() => {
+    const s = lsGet("breath-mode");
+    return MODES.some((m) => m.id === s) ? s : "resonancia";
+  });
   const [running, setRunning] = useState(false);
-  const [muted, setMuted] = useState(false);
-  const [volume, setVolume] = useState(0.5);
+  const [muted, setMuted] = useState(() => lsGet("breath-muted") === "1");
+  const [volume, setVolume] = useState(() => {
+    const v = parseFloat(lsGet("breath-vol"));
+    return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.5;
+  });
   const [phaseIdx, setPhaseIdx] = useState(0);
   const [counter, setCounter] = useState(0); // segundos restantes de la fase (entero)
   const [remaining, setRemaining] = useState(null); // seg restantes de sesión (entero)
@@ -115,9 +125,20 @@ export default function Pacer() {
     reduced.current = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
   }, []);
 
+  useEffect(() => { lsSet("breath-mode", modeId); }, [modeId]);
+  useEffect(() => { lsSet("breath-muted", muted ? "1" : "0"); }, [muted]);
+  useEffect(() => { lsSet("breath-vol", String(volume)); }, [volume]);
+
+  // — al abrir con un modo persistido fuera de vista (p.ej. Energía), centrarlo —
+  const modesEl = useRef(null);
+  useEffect(() => {
+    modesEl.current?.querySelector('[aria-pressed="true"]')
+      ?.scrollIntoView({ inline: "center", block: "nearest" });
+  }, []);
+
   // — hint de instalación: iOS nunca ofrece solo; Android dispara beforeinstallprompt —
   useEffect(() => {
-    if (isStandalone() || localStorage.getItem("breath-hide-install")) return;
+    if (isStandalone() || lsGet("breath-hide-install")) return;
     if (/iphone|ipad|ipod/i.test(navigator.userAgent)) setInstallHint("ios");
     const onPrompt = (e) => {
       e.preventDefault();
@@ -128,7 +149,7 @@ export default function Pacer() {
     return () => window.removeEventListener("beforeinstallprompt", onPrompt);
   }, []);
   const dismissHint = () => {
-    localStorage.setItem("breath-hide-install", "1");
+    lsSet("breath-hide-install", "1");
     setInstallHint(null);
   };
 
@@ -299,6 +320,13 @@ export default function Pacer() {
   const ratioDots = mode.phases.map((p) => `${p.secs}s`).join(" · ");
   const ratioSlash = mode.phases.map((p) => `${p.secs}s`).join(" / ");
 
+  // — label anterior para el crossfade Inhalá→Exhalá —
+  const labelHist = useRef({ cur: phase.label, prev: null });
+  if (labelHist.current.cur !== phase.label) {
+    labelHist.current = { cur: phase.label, prev: labelHist.current.cur };
+  }
+  const ghostLabel = running ? labelHist.current.prev : null;
+
   const pickMode = (m, ev) => {
     setModeId(m.id);
     ev.currentTarget.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
@@ -361,10 +389,18 @@ export default function Pacer() {
         .center{ position:absolute; inset:0; display:flex; flex-direction:column;
           align-items:center; justify-content:center; pointer-events:none; text-align:center;
           transform:translateY(calc(var(--disc)*0.045)); }
+        .phase-wrap{ position:relative; display:grid; place-items:center; }
         .phase{ font-family:'Fraunces',serif; font-weight:500;
           font-size:clamp(26px, calc(var(--disc)*0.22), 44px);
           text-transform:uppercase; letter-spacing:.06em; color:#F6F3ED; line-height:1;
-          text-shadow:0 2px 18px rgba(0,0,0,.35); }
+          text-shadow:0 2px 18px rgba(0,0,0,.35); grid-area:1/1; white-space:nowrap; }
+        .phase-in{ animation:phaseIn .55s ease-out both; }
+        .phase-out{ animation:phaseOut .45s ease-in both; }
+        @keyframes phaseIn{ from{ opacity:0; transform:translateY(9px); } to{ opacity:1; transform:none; } }
+        @keyframes phaseOut{ from{ opacity:1; transform:none; } to{ opacity:0; transform:translateY(-9px); } }
+        @media (prefers-reduced-motion: reduce){
+          .phase-in,.phase-out{ animation-duration:.01s; }
+        }
         .count{ font-size:14px; color:#CBD3DC; margin-top:11px; letter-spacing:.14em; }
         .done-txt{ font-family:'Fraunces',serif; font-size:28px; letter-spacing:.08em;
           text-transform:uppercase; color:var(--mint); }
@@ -394,13 +430,26 @@ export default function Pacer() {
         .sound-btn{ background:none; border:none; color:#E8ECF0; cursor:pointer; padding:2px;
           display:grid; place-items:center; }
         .sound-btn:focus-visible{ outline:2px solid var(--mint); outline-offset:2px; border-radius:6px; }
-        .sound-row input[type=range]{ width:54px; accent-color:var(--mint); cursor:pointer; }
+        .sound-row input[type=range]{ -webkit-appearance:none; appearance:none;
+          width:56px; height:18px; background:transparent; cursor:pointer; }
+        .sound-row input[type=range]::-webkit-slider-runnable-track{
+          height:3px; border-radius:2px; background:#4A5262; }
+        .sound-row input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none;
+          width:11px; height:11px; border-radius:50%; background:var(--mint-deep);
+          margin-top:-4px; box-shadow:0 0 6px rgba(160,235,200,.45); }
+        .sound-row input[type=range]::-moz-range-track{
+          height:3px; border-radius:2px; background:#4A5262; }
+        .sound-row input[type=range]::-moz-range-thumb{
+          width:11px; height:11px; border:none; border-radius:50%; background:var(--mint-deep);
+          box-shadow:0 0 6px rgba(160,235,200,.45); }
         .sound-label{ font-size:10.5px; letter-spacing:.14em; color:#C7CDD6; }
         .sparkle{ color:var(--mint); font-size:12px; line-height:1; opacity:.85; }
-        .meta{ display:flex; justify-content:space-between; gap:6px 14px; flex-wrap:wrap;
-          margin-top:10px; padding:0 3px; font-size:12px; color:#A9B1BF; letter-spacing:.01em; }
-        .meta span{ white-space:nowrap; }
-        .meta b{ color:var(--txt); font-weight:700; }
+        .meta{ display:flex; justify-content:space-between; align-items:flex-end;
+          margin-top:12px; padding:0 5px; }
+        .meta .cell{ display:flex; flex-direction:column; gap:3px; }
+        .meta .cell:last-child{ align-items:flex-end; }
+        .meta .lbl{ font-size:9.5px; letter-spacing:.12em; color:#8D96A5; text-transform:uppercase; }
+        .meta .val{ font-size:13.5px; color:var(--txt); font-weight:700; white-space:nowrap; }
         .install{ display:flex; align-items:center; gap:9px; margin-top:7px;
           font-size:11px; color:#98A1AF; line-height:1.4; max-width:440px; }
         .install .cta{ font-family:inherit; font-weight:700; font-size:11px; border:none;
@@ -417,7 +466,7 @@ export default function Pacer() {
         }
       `}</style>
 
-      <div className="modes-scroll" role="group" aria-label="Modos de respiración">
+      <div ref={modesEl} className="modes-scroll" role="group" aria-label="Modos de respiración">
         <div className="modes-group">
           {MODES.map((m) => (
             <button key={m.id} className="mode-btn" aria-pressed={m.id === modeId}
@@ -445,7 +494,13 @@ export default function Pacer() {
             <div className="done-txt">Listo</div>
           ) : (
             <>
-              <div className="phase">{phase.label}</div>
+              <div className="phase-wrap">
+                <div className="phase phase-in" key={`${phaseIdx}-${phase.label}`}>{phase.label}</div>
+                {ghostLabel && (
+                  <div className="phase phase-out" aria-hidden="true"
+                    key={`ghost-${phaseIdx}`}>{ghostLabel}</div>
+                )}
+              </div>
               <div className="count">{running ? `${counter}s` : ratioDots}</div>
             </>
           )}
@@ -510,8 +565,14 @@ export default function Pacer() {
         </div>
 
         <div className="meta">
-          <span>Ritmo Actual: <b>{ratioSlash}</b></span>
-          <span>Tiempo Restante: <b>{fmt(remaining ?? mode.defaultMin * 60)} Min</b></span>
+          <div className="cell">
+            <span className="lbl">Ritmo Actual</span>
+            <span className="val">{ratioSlash}</span>
+          </div>
+          <div className="cell">
+            <span className="lbl">Tiempo Restante</span>
+            <span className="val">{fmt(remaining ?? mode.defaultMin * 60)} Min</span>
+          </div>
         </div>
       </div>
 
