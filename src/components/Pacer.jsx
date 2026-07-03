@@ -64,6 +64,8 @@ const fmt = (s) => {
   const r = Math.floor(s % 60);
   return `${m}:${r.toString().padStart(2, "0")}`;
 };
+const kindOf = (key) =>
+  key.startsWith("inhale") ? "inhale" : key.startsWith("exhale") ? "exhale" : "hold";
 
 // — onda decorativa: dos ráfagas de sinusoide con envolvente gaussiana —
 const WAVE_PATH = (() => {
@@ -80,6 +82,9 @@ const WAVE_PATH = (() => {
 const R = 158; // radio del arco de progreso (viewBox 400)
 const CIRC = 2 * Math.PI * R;
 
+const isStandalone = () =>
+  window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone;
+
 export default function Pacer() {
   const [modeId, setModeId] = useState("resonancia");
   const [running, setRunning] = useState(false);
@@ -89,31 +94,56 @@ export default function Pacer() {
   const [phaseProg, setPhaseProg] = useState(0); // 0..1
   const [remaining, setRemaining] = useState(null); // seg restantes de sesión
   const [done, setDone] = useState(false);
+  const [installHint, setInstallHint] = useState(null); // 'ios' | 'android' | null
+  const [installEvt, setInstallEvt] = useState(null);
 
   const mode = MODES.find((m) => m.id === modeId);
   const phase = mode.phases[phaseIdx];
+  const cycleMs = mode.phases.reduce((a, p) => a + p.secs, 0) * 1000;
 
   const reduced = useRef(false);
   useEffect(() => {
     reduced.current = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
   }, []);
 
-  // — refs del loop —
+  // — hint de instalación: iOS nunca ofrece solo; Android dispara beforeinstallprompt —
+  useEffect(() => {
+    if (isStandalone() || localStorage.getItem("breath-hide-install")) return;
+    if (/iphone|ipad|ipod/i.test(navigator.userAgent)) setInstallHint("ios");
+    const onPrompt = (e) => {
+      e.preventDefault();
+      setInstallEvt(e);
+      setInstallHint("android");
+    };
+    window.addEventListener("beforeinstallprompt", onPrompt);
+    return () => window.removeEventListener("beforeinstallprompt", onPrompt);
+  }, []);
+  const dismissHint = () => {
+    localStorage.setItem("breath-hide-install", "1");
+    setInstallHint(null);
+  };
+
+  // — refs del loop: el reloj es absoluto (performance.now), no acumulativo,
+  //   así una vuelta desde segundo plano retoma en la fase correcta —
   const raf = useRef(0);
-  const phaseStart = useRef(0);
+  const cycleT0 = useRef(0); // inicio (virtual) del ciclo actual
+  const cycleOffset = useRef(0); // ms ya transcurridos del ciclo al pausar
   const idxRef = useRef(0);
   const sessionEnd = useRef(0);
+  const runningRef = useRef(false);
   const audioCtx = useRef(null);
+  const wakeLock = useRef(null);
   const volRef = useRef(volume);
   const mutedRef = useRef(muted);
   volRef.current = volume;
   mutedRef.current = muted;
 
   const beep = useCallback((kind) => {
-    if (mutedRef.current || volRef.current <= 0) return;
+    if (mutedRef.current || volRef.current <= 0 || document.hidden) return;
     try {
       if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
       const ctx = audioCtx.current;
+      if (ctx.state === "suspended") ctx.resume();
       const o = ctx.createOscillator();
       const g = ctx.createGain();
       const freq = kind === "inhale" ? 396 : kind === "exhale" ? 264 : 330;
@@ -128,15 +158,30 @@ export default function Pacer() {
     } catch { /* sin audio, seguimos */ }
   }, []);
 
+  // — wake lock: que la pantalla no se apague durante la sesión —
+  const acquireWake = useCallback(async () => {
+    try { wakeLock.current = await navigator.wakeLock?.request("screen"); } catch { /* opcional */ }
+  }, []);
+  const releaseWake = useCallback(() => {
+    try { wakeLock.current?.release(); } catch { /* ya liberado */ }
+    wakeLock.current = null;
+  }, []);
+
   const stop = useCallback(() => {
     cancelAnimationFrame(raf.current);
+    if (runningRef.current) {
+      cycleOffset.current = (performance.now() - cycleT0.current) % cycleMs;
+    }
+    runningRef.current = false;
     setRunning(false);
-  }, []);
+    releaseWake();
+  }, [cycleMs, releaseWake]);
 
   const reset = useCallback(() => {
     stop();
-    setPhaseIdx(0);
+    cycleOffset.current = 0;
     idxRef.current = 0;
+    setPhaseIdx(0);
     setPhaseProg(0);
     setDone(false);
     setRemaining(mode.defaultMin * 60);
@@ -148,44 +193,64 @@ export default function Pacer() {
   const start = useCallback(() => {
     if (done) reset();
     const now = performance.now();
-    phaseStart.current = now;
-    const total = (remaining ?? mode.defaultMin * 60);
+    cycleT0.current = now - (done ? 0 : cycleOffset.current);
+    const total = done ? mode.defaultMin * 60 : (remaining ?? mode.defaultMin * 60);
     sessionEnd.current = now + total * 1000;
+    runningRef.current = true;
     setRunning(true);
     setDone(false);
-    beep(mode.phases[idxRef.current].key.startsWith("inhale") ? "inhale" : "hold");
+    acquireWake();
+    beep(kindOf(mode.phases[idxRef.current].key));
+
+    const phaseAt = (msInCycle) => {
+      let acc = 0;
+      for (let i = 0; i < mode.phases.length; i++) {
+        const d = mode.phases[i].secs * 1000;
+        if (msInCycle < acc + d) return { i, prog: (msInCycle - acc) / d };
+        acc += d;
+      }
+      return { i: mode.phases.length - 1, prog: 1 };
+    };
 
     const tick = (t) => {
-      const cur = mode.phases[idxRef.current];
-      const dur = cur.secs * 1000;
-      let elapsed = t - phaseStart.current;
-      if (elapsed >= dur) {
-        phaseStart.current = t;
-        const next = (idxRef.current + 1) % mode.phases.length;
-        idxRef.current = next;
-        setPhaseIdx(next);
-        const nk = mode.phases[next].key;
-        beep(nk.startsWith("inhale") ? "inhale" : nk.startsWith("exhale") ? "exhale" : "hold");
-        elapsed = 0;
+      const cyc = (t - cycleT0.current) % cycleMs;
+      const { i, prog } = phaseAt(cyc);
+      if (i !== idxRef.current) {
+        idxRef.current = i;
+        setPhaseIdx(i);
+        beep(kindOf(mode.phases[i].key));
       }
-      setPhaseProg(Math.min(1, elapsed / dur));
+      setPhaseProg(prog);
 
       const left = Math.max(0, (sessionEnd.current - t) / 1000);
       setRemaining(left);
       if (left <= 0) {
+        runningRef.current = false;
         setRunning(false);
         setDone(true);
+        cycleOffset.current = 0;
+        releaseWake();
         beep("exhale");
         return;
       }
       raf.current = requestAnimationFrame(tick);
     };
     raf.current = requestAnimationFrame(tick);
-  }, [mode, remaining, done, reset, beep]);
+  }, [mode, remaining, done, reset, beep, cycleMs, acquireWake, releaseWake]);
 
   const toggle = useCallback(() => { if (running) stop(); else start(); }, [running, stop, start]);
 
-  useEffect(() => () => cancelAnimationFrame(raf.current), []);
+  useEffect(() => () => { cancelAnimationFrame(raf.current); releaseWake(); }, [releaseWake]);
+
+  // — el wake lock se pierde al ir a segundo plano: re-adquirir al volver —
+  useEffect(() => {
+    const onVis = () => {
+      if (!document.hidden && runningRef.current) acquireWake();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [acquireWake]);
+
   useEffect(() => {
     const onKey = (e) => {
       if (e.code === "Space" && e.target.tagName !== "INPUT") { e.preventDefault(); toggle(); }
@@ -216,18 +281,19 @@ export default function Pacer() {
           --bg-0:#2A303C; --bg-1:#232833; --panel:#343B49; --pill:#3A4150;
           --mint:#A9EFD2; --mint-deep:#7FD8B8; --ink:#14241D;
           --txt:#EFF2F5; --muted:#A0A8B6; --line:rgba(255,255,255,.08);
-          min-height:100dvh; width:100%; overflow:hidden; position:relative;
+          height:100dvh; width:100%; overflow:hidden; position:relative;
           display:flex; flex-direction:column; align-items:center;
           background:linear-gradient(180deg,var(--bg-0),var(--bg-1) 55%,#20242E);
           color:var(--txt); font-family:'Space Mono',ui-monospace,monospace;
-          padding:26px 14px calc(18px + env(safe-area-inset-bottom)); user-select:none;
+          padding:calc(14px + env(safe-area-inset-top)) 14px calc(10px + env(safe-area-inset-bottom));
+          user-select:none;
         }
         .modes-group{ display:flex; background:var(--pill); border-radius:999px;
-          padding:5px; gap:2px; margin-bottom:10px; box-shadow:inset 0 2px 6px rgba(0,0,0,.18); }
+          padding:5px; gap:2px; margin-bottom:8px; box-shadow:inset 0 2px 6px rgba(0,0,0,.18); }
         .mode-btn{
           background:transparent; border:none; color:#A9B1BF;
-          font-family:inherit; font-size:15px; letter-spacing:.02em;
-          padding:9px 17px; border-radius:999px; cursor:pointer; transition:color .2s;
+          font-family:inherit; font-size:14px; letter-spacing:.02em;
+          padding:8px 15px; border-radius:999px; cursor:pointer; transition:color .2s;
         }
         .mode-btn:hover{ color:var(--txt); }
         .mode-btn[aria-pressed="true"]{
@@ -235,17 +301,18 @@ export default function Pacer() {
           box-shadow:0 0 0 2px #9FE8C9, 0 0 16px rgba(160,235,200,.45);
         }
         .mode-btn:focus-visible{ outline:2px solid var(--mint); outline-offset:2px; }
-        .sub{ font-size:14.5px; color:#D9E4DE; letter-spacing:.02em;
-          margin:14px 0 0; text-align:center; min-height:20px; }
-        .stage{ position:relative; width:100%; max-width:460px; height:min(410px, 48dvh);
-          min-height:330px; display:flex; align-items:center; justify-content:center; flex:1; }
-        .wave{ position:absolute; top:50%; left:50%; width:684px; height:200px;
-          transform:translate(-50%,-50%); opacity:.55; pointer-events:none; }
-        .halo{ position:absolute; width:88%; max-width:360px; aspect-ratio:1; border-radius:50%;
-          background:radial-gradient(circle, rgba(219,124,64,.5), rgba(219,124,64,.16) 48%, transparent 72%);
+        .sub{ font-size:13px; color:#CBD8D2; letter-spacing:.02em;
+          margin:6px 0 0; text-align:center; min-height:18px; }
+        .stage{ position:relative; width:100%; flex:1; min-height:0;
+          --disc:min(252px, 36dvh, 62vw); }
+        .layer{ position:absolute; top:50%; left:50%;
+          transform:translate(-50%,-50%); pointer-events:none; }
+        .wave{ width:684px; height:200px; opacity:.38; }
+        .halo{ width:calc(var(--disc)*1.45); aspect-ratio:1; border-radius:50%;
+          background:radial-gradient(circle, rgba(219,124,64,.46), rgba(219,124,64,.15) 48%, transparent 72%);
           filter:blur(4px); transition:transform .12s linear; will-change:transform; }
-        .ring-svg{ position:absolute; width:100%; max-width:410px; aspect-ratio:1; pointer-events:none; }
-        .disc{ position:relative; width:62%; max-width:256px; aspect-ratio:1; border-radius:50%;
+        .ring-svg{ width:calc(var(--disc)*1.62); aspect-ratio:1; }
+        .disc{ width:var(--disc); aspect-ratio:1; border-radius:50%;
           background:
             radial-gradient(circle at 50% 28%, rgba(255,255,255,.10), transparent 46%),
             radial-gradient(circle at 50% 45%, #39414F, #232935 78%);
@@ -256,47 +323,60 @@ export default function Pacer() {
           transition:transform .12s linear; will-change:transform; }
         .center{ position:absolute; inset:0; display:flex; flex-direction:column;
           align-items:center; justify-content:center; pointer-events:none; text-align:center; }
-        .phase{ font-family:'Fraunces',serif; font-weight:500; font-size:clamp(34px,9vw,44px);
-          text-transform:uppercase; letter-spacing:.05em; color:#F6F3ED; line-height:1;
+        .phase{ font-family:'Fraunces',serif; font-weight:500;
+          font-size:clamp(26px, calc(var(--disc)*0.24), 40px);
+          text-transform:uppercase; letter-spacing:.06em; color:#F6F3ED; line-height:1;
           text-shadow:0 2px 18px rgba(0,0,0,.35); }
-        .count{ font-size:16px; color:#CBD3DC; margin-top:12px; letter-spacing:.14em; }
-        .done-txt{ font-family:'Fraunces',serif; font-size:30px; letter-spacing:.08em;
+        .count{ font-size:14px; color:#CBD3DC; margin-top:10px; letter-spacing:.14em; }
+        .done-txt{ font-family:'Fraunces',serif; font-size:28px; letter-spacing:.08em;
           text-transform:uppercase; color:var(--mint); }
         .panel{ width:100%; max-width:440px; background:rgba(52,59,73,.88);
-          border-radius:26px; padding:16px 16px 10px; margin-top:10px;
+          border-radius:24px; padding:13px 15px 9px; margin-top:6px;
           box-shadow:0 12px 34px rgba(0,0,0,.28); }
         .panel-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
-        .icon-col{ display:flex; flex-direction:column; align-items:center; gap:7px;
+        .icon-col{ display:flex; flex-direction:column; align-items:center; gap:6px;
           background:none; border:none; color:#C7CDD6; cursor:pointer; padding:0;
-          font-family:inherit; font-size:11px; letter-spacing:.12em; }
+          font-family:inherit; font-size:10.5px; letter-spacing:.12em; }
         .icon-col:hover .icon-circle{ background:#454D5E; }
         .icon-col:focus-visible{ outline:2px solid var(--mint); outline-offset:3px; border-radius:10px; }
-        .icon-circle{ width:46px; height:46px; border-radius:50%; background:#3A4150;
+        .icon-circle{ width:44px; height:44px; border-radius:50%; background:#3A4150;
           display:grid; place-items:center; transition:background .2s; }
         .play{ display:flex; align-items:center; justify-content:center; gap:8px;
-          font-family:inherit; font-weight:700; font-size:clamp(11px,3.2vw,15px);
+          font-family:inherit; font-weight:700; font-size:clamp(11px,3.2vw,14px);
           letter-spacing:.04em; color:var(--ink); border:none; border-radius:999px;
           background:linear-gradient(180deg,#C4F8E1,#8FE7C4);
-          padding:17px 16px; flex:1; max-width:238px; cursor:pointer; white-space:nowrap;
+          padding:16px 14px; flex:1; max-width:238px; cursor:pointer; white-space:nowrap;
           box-shadow:0 6px 24px rgba(150,240,200,.35); transition:transform .12s ease; }
         .play:hover{ transform:translateY(-1px); }
         .play:focus-visible{ outline:2px solid var(--mint); outline-offset:3px; }
-        .sound-block{ display:flex; flex-direction:column; align-items:center; gap:5px; }
-        .sound-title{ font-size:10.5px; color:#A9B1BF; letter-spacing:.02em;
-          text-align:center; max-width:92px; line-height:1.35; }
-        .sound-row{ display:flex; align-items:center; gap:6px; }
+        .sound-block{ display:flex; flex-direction:column; align-items:center; gap:4px; }
+        .sound-title{ font-size:10px; color:#A9B1BF; letter-spacing:.02em;
+          text-align:center; max-width:90px; line-height:1.3; }
+        .sound-row{ display:flex; align-items:center; gap:5px; }
         .sound-btn{ background:none; border:none; color:#E8ECF0; cursor:pointer; padding:2px;
           display:grid; place-items:center; }
         .sound-btn:focus-visible{ outline:2px solid var(--mint); outline-offset:2px; border-radius:6px; }
-        .sound-row input[type=range]{ width:56px; accent-color:var(--mint); cursor:pointer; }
-        .sound-label{ font-size:11px; letter-spacing:.14em; color:#C7CDD6; }
-        .sparkle{ color:var(--mint); font-size:13px; line-height:1; opacity:.85; }
-        .meta{ display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;
-          margin-top:13px; padding:0 4px; font-size:12.5px; color:#A9B1BF; letter-spacing:.02em; }
+        .sound-row input[type=range]{ width:54px; accent-color:var(--mint); cursor:pointer; }
+        .sound-label{ font-size:10.5px; letter-spacing:.14em; color:#C7CDD6; }
+        .sparkle{ color:var(--mint); font-size:12px; line-height:1; opacity:.85; }
+        .meta{ display:flex; justify-content:space-between; gap:6px 14px; flex-wrap:wrap;
+          margin-top:10px; padding:0 3px; font-size:12px; color:#A9B1BF; letter-spacing:.01em; }
+        .meta span{ white-space:nowrap; }
         .meta b{ color:var(--txt); font-weight:700; }
+        .install{ display:flex; align-items:center; gap:9px; margin-top:7px;
+          font-size:11px; color:#98A1AF; line-height:1.4; max-width:440px; }
+        .install .cta{ font-family:inherit; font-weight:700; font-size:11px; border:none;
+          border-radius:999px; padding:6px 14px; cursor:pointer;
+          background:var(--mint); color:var(--ink); letter-spacing:.04em; }
+        .install .dismiss{ background:none; border:none; color:#7C8595; cursor:pointer;
+          font-size:15px; padding:2px 6px; line-height:1; }
         @media (max-width:380px){
-          .mode-btn{ font-size:13px; padding:8px 12px; }
+          .mode-btn{ font-size:12.5px; padding:7px 11px; }
           .panel-row{ gap:8px; }
+        }
+        @media (max-height:640px){
+          .sub{ display:none; }
+          .modes-group{ margin-bottom:5px; }
         }
       `}</style>
 
@@ -308,7 +388,7 @@ export default function Pacer() {
               onClick={() => setModeId(m.id)}>{m.name}</button>
           ))}
         </div>
-        <div className="modes-group">
+        <div className="modes-group" style={{ marginBottom: 0 }}>
           {MODES.slice(4).map((m) => (
             <button key={m.id} className="mode-btn" aria-pressed={m.id === modeId}
               onClick={() => setModeId(m.id)}>{m.name}</button>
@@ -318,11 +398,11 @@ export default function Pacer() {
       <div className="sub">{mode.sub}</div>
 
       <div className="stage">
-        <svg className="wave" viewBox="0 0 684 200" aria-hidden="true">
-          <path d={WAVE_PATH} fill="none" stroke="#9BA4B0" strokeWidth="1.6" />
+        <svg className="wave layer" viewBox="0 0 684 200" aria-hidden="true">
+          <path d={WAVE_PATH} fill="none" stroke="#8A93A3" strokeWidth="1.6" />
         </svg>
-        <div className="halo" style={{ transform: `scale(${scale})` }} />
-        <svg className="ring-svg" viewBox="0 0 400 400" aria-hidden="true">
+        <div className="halo layer" style={{ transform: `translate(-50%,-50%) scale(${scale})` }} />
+        <svg className="ring-svg layer" viewBox="0 0 400 400" aria-hidden="true">
           <circle cx="200" cy="200" r={R} fill="none" stroke="var(--line)" strokeWidth="1.5" />
           <circle cx="200" cy="200" r={R} fill="none" stroke="var(--mint)" strokeWidth="2"
             strokeLinecap="round" strokeDasharray={CIRC}
@@ -330,7 +410,7 @@ export default function Pacer() {
             transform="rotate(-90 200 200)"
             style={{ transition: "stroke-dashoffset .12s linear", opacity: running ? 0.5 : 0 }} />
         </svg>
-        <div className="disc" style={{ transform: `scale(${scale})` }} />
+        <div className="disc layer" style={{ transform: `translate(-50%,-50%) scale(${scale})` }} />
         <div className="center">
           {done ? (
             <div className="done-txt">Listo</div>
@@ -347,7 +427,7 @@ export default function Pacer() {
         <div className="panel-row">
           <button className="icon-col" onClick={reset} aria-label="Reiniciar sesión">
             <span className="icon-circle">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none"
                 stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 12a9 9 0 1 1-2.64-6.36" />
                 <polyline points="21 3 21 9 15 9" />
@@ -358,12 +438,12 @@ export default function Pacer() {
 
           <button className="play" onClick={toggle}>
             {running ? (
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <rect x="5" y="4" width="5" height="16" rx="1.5" />
                 <rect x="14" y="4" width="5" height="16" rx="1.5" />
               </svg>
             ) : (
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M7 4.5v15c0 .9 1 1.5 1.8 1l12-7.5c.7-.5.7-1.5 0-2L8.8 3.5C8 3 7 3.6 7 4.5Z" />
               </svg>
             )}
@@ -375,7 +455,7 @@ export default function Pacer() {
             <div className="sound-row">
               <button className="sound-btn" onClick={() => setMuted((m) => !m)}
                 aria-pressed={muted} aria-label={muted ? "Activar sonido" : "Silenciar"}>
-                <svg width="21" height="21" viewBox="0 0 24 24" fill="none"
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
                   stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M11 5 6.5 8.5H3v7h3.5L11 19V5Z" fill="currentColor" stroke="none" />
                   {muted ? (
@@ -405,6 +485,21 @@ export default function Pacer() {
           <span>Tiempo Restante: <b>{fmt(remaining ?? mode.defaultMin * 60)} Min</b></span>
         </div>
       </div>
+
+      {installHint === "ios" && (
+        <div className="install">
+          <span>Para instalar: tocá <b>Compartir</b> y elegí <b>“Agregar a inicio”</b></span>
+          <button className="dismiss" onClick={dismissHint} aria-label="Cerrar aviso">✕</button>
+        </div>
+      )}
+      {installHint === "android" && (
+        <div className="install">
+          <button className="cta" onClick={async () => { installEvt?.prompt(); dismissHint(); }}>
+            INSTALAR APP
+          </button>
+          <button className="dismiss" onClick={dismissHint} aria-label="Cerrar aviso">✕</button>
+        </div>
+      )}
     </div>
   );
 }
