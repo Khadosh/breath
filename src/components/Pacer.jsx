@@ -67,6 +67,15 @@ const fmt = (s) => {
 const kindOf = (key) =>
   key.startsWith("inhale") ? "inhale" : key.startsWith("exhale") ? "exhale" : "hold";
 
+// escala del disco para una fase y su progreso (0..1)
+const scaleFor = (key, prog, reducedMotion) => {
+  if (reducedMotion) return key === "exhale" || key === "hold2" ? 0.76 : 0.92;
+  const e = easeInOutSine(prog);
+  if (key.startsWith("inhale")) return 0.72 + 0.28 * e;
+  if (key.startsWith("exhale")) return 1.0 - 0.28 * e;
+  return key === "hold" ? 1.0 : 0.72; // hold tras inhalar / hold2 tras exhalar
+};
+
 // — onda decorativa: dos ráfagas de sinusoide con envolvente gaussiana —
 const WAVE_PATH = (() => {
   let d = "M0 100";
@@ -91,8 +100,8 @@ export default function Pacer() {
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(0.5);
   const [phaseIdx, setPhaseIdx] = useState(0);
-  const [phaseProg, setPhaseProg] = useState(0); // 0..1
-  const [remaining, setRemaining] = useState(null); // seg restantes de sesión
+  const [counter, setCounter] = useState(0); // segundos restantes de la fase (entero)
+  const [remaining, setRemaining] = useState(null); // seg restantes de sesión (entero)
   const [done, setDone] = useState(false);
   const [installHint, setInstallHint] = useState(null); // 'ios' | 'android' | null
   const [installEvt, setInstallEvt] = useState(null);
@@ -129,6 +138,8 @@ export default function Pacer() {
   const cycleT0 = useRef(0); // inicio (virtual) del ciclo actual
   const cycleOffset = useRef(0); // ms ya transcurridos del ciclo al pausar
   const idxRef = useRef(0);
+  const counterRef = useRef(0);
+  const remainRef = useRef(-1);
   const sessionEnd = useRef(0);
   const runningRef = useRef(false);
   const audioCtx = useRef(null);
@@ -137,6 +148,22 @@ export default function Pacer() {
   const mutedRef = useRef(muted);
   volRef.current = volume;
   mutedRef.current = muted;
+
+  // — el disco/halo/arco se animan escribiendo el DOM directo desde el rAF:
+  //   sin re-render de React por frame ni transition CSS que "corra a alcanzar"
+  //   el valor tras un frame salteado (eso causaba el temblor) —
+  const discEl = useRef(null);
+  const haloEl = useRef(null);
+  const arcEl = useRef(null);
+
+  const applyScale = useCallback((s) => {
+    const t = `translate(-50%,-50%) scale(${s.toFixed(4)})`;
+    if (discEl.current) discEl.current.style.transform = t;
+    if (haloEl.current) haloEl.current.style.transform = t;
+  }, []);
+  const applyProg = useCallback((p) => {
+    if (arcEl.current) arcEl.current.style.strokeDashoffset = `${CIRC * (1 - p)}`;
+  }, []);
 
   const beep = useCallback((kind) => {
     if (mutedRef.current || volRef.current <= 0 || document.hidden) return;
@@ -182,10 +209,12 @@ export default function Pacer() {
     cycleOffset.current = 0;
     idxRef.current = 0;
     setPhaseIdx(0);
-    setPhaseProg(0);
     setDone(false);
-    setRemaining(mode.defaultMin * 60);
-  }, [mode, stop]);
+    remainRef.current = mode.defaultMin * 60;
+    setRemaining(remainRef.current);
+    applyScale(scaleFor("inhale", 0, reduced.current));
+    applyProg(0);
+  }, [mode, stop, applyScale, applyProg]);
 
   useEffect(() => { reset(); /* al cambiar de modo */ // eslint-disable-next-line
   }, [modeId]);
@@ -220,10 +249,16 @@ export default function Pacer() {
         setPhaseIdx(i);
         beep(kindOf(mode.phases[i].key));
       }
-      setPhaseProg(prog);
+      applyScale(scaleFor(mode.phases[i].key, prog, reduced.current));
+      applyProg(prog);
+
+      const c = Math.max(1, Math.ceil(mode.phases[i].secs * (1 - prog)));
+      if (c !== counterRef.current) { counterRef.current = c; setCounter(c); }
 
       const left = Math.max(0, (sessionEnd.current - t) / 1000);
-      setRemaining(left);
+      const leftInt = Math.floor(left);
+      if (leftInt !== remainRef.current) { remainRef.current = leftInt; setRemaining(leftInt); }
+
       if (left <= 0) {
         runningRef.current = false;
         setRunning(false);
@@ -231,12 +266,14 @@ export default function Pacer() {
         cycleOffset.current = 0;
         releaseWake();
         beep("exhale");
+        applyScale(scaleFor("inhale", 0, reduced.current));
+        applyProg(0);
         return;
       }
       raf.current = requestAnimationFrame(tick);
     };
     raf.current = requestAnimationFrame(tick);
-  }, [mode, remaining, done, reset, beep, cycleMs, acquireWake, releaseWake]);
+  }, [mode, remaining, done, reset, beep, cycleMs, acquireWake, releaseWake, applyScale, applyProg]);
 
   const toggle = useCallback(() => { if (running) stop(); else start(); }, [running, stop, start]);
 
@@ -259,19 +296,13 @@ export default function Pacer() {
     return () => window.removeEventListener("keydown", onKey);
   }, [toggle]);
 
-  // — escala del disco según fase —
-  let scale = 0.72;
-  const k = phase.key;
-  const e = easeInOutSine(phaseProg);
-  if (k.startsWith("inhale")) scale = 0.72 + 0.28 * e;
-  else if (k.startsWith("exhale")) scale = 1.0 - 0.28 * e;
-  else if (k === "hold") scale = 1.0; // hold tras inhalar
-  else scale = 0.72; // hold2 tras exhalar
-  if (reduced.current) scale = k.startsWith("inhale") ? 0.92 : k.startsWith("exhale") ? 0.76 : (k === "hold" ? 0.92 : 0.76);
-
-  const counter = Math.max(1, Math.ceil(phase.secs - phaseProg * phase.secs));
   const ratioDots = mode.phases.map((p) => `${p.secs}s`).join(" · ");
   const ratioSlash = mode.phases.map((p) => `${p.secs}s`).join(" / ");
+
+  const pickMode = (m, ev) => {
+    setModeId(m.id);
+    ev.currentTarget.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+  };
 
   return (
     <div className="pacer-root">
@@ -288,10 +319,16 @@ export default function Pacer() {
           padding:calc(14px + env(safe-area-inset-top)) 14px calc(10px + env(safe-area-inset-bottom));
           user-select:none;
         }
-        .modes-group{ display:flex; background:var(--pill); border-radius:999px;
-          padding:5px; gap:2px; margin-bottom:8px; box-shadow:inset 0 2px 6px rgba(0,0,0,.18); }
+        .modes-scroll{ max-width:100%; display:flex; overflow-x:auto;
+          scrollbar-width:none; -webkit-overflow-scrolling:touch;
+          mask-image:linear-gradient(90deg,transparent,#000 16px,#000 calc(100% - 16px),transparent);
+          -webkit-mask-image:linear-gradient(90deg,transparent,#000 16px,#000 calc(100% - 16px),transparent); }
+        .modes-scroll::-webkit-scrollbar{ display:none; }
+        .modes-group{ display:flex; width:max-content; margin:0 auto;
+          background:var(--pill); border-radius:999px;
+          padding:5px; gap:2px; box-shadow:inset 0 2px 6px rgba(0,0,0,.18); }
         .mode-btn{
-          background:transparent; border:none; color:#A9B1BF;
+          background:transparent; border:none; color:#A9B1BF; white-space:nowrap;
           font-family:inherit; font-size:14px; letter-spacing:.02em;
           padding:8px 15px; border-radius:999px; cursor:pointer; transition:color .2s;
         }
@@ -302,16 +339,16 @@ export default function Pacer() {
         }
         .mode-btn:focus-visible{ outline:2px solid var(--mint); outline-offset:2px; }
         .sub{ font-size:13px; color:#CBD8D2; letter-spacing:.02em;
-          margin:6px 0 0; text-align:center; min-height:18px; }
+          margin:10px 0 0; text-align:center; min-height:18px; }
         .stage{ position:relative; width:100%; flex:1; min-height:0;
-          --disc:min(252px, 36dvh, 62vw); }
+          --disc:min(320px, 42dvh, 70vw); }
         .layer{ position:absolute; top:50%; left:50%;
           transform:translate(-50%,-50%); pointer-events:none; }
         .wave{ width:684px; height:200px; opacity:.38; }
         .halo{ width:calc(var(--disc)*1.45); aspect-ratio:1; border-radius:50%;
-          background:radial-gradient(circle, rgba(219,124,64,.46), rgba(219,124,64,.15) 48%, transparent 72%);
-          filter:blur(4px); transition:transform .12s linear; will-change:transform; }
-        .ring-svg{ width:calc(var(--disc)*1.62); aspect-ratio:1; }
+          background:radial-gradient(circle, rgba(214,112,60,.44), rgba(214,112,60,.14) 48%, transparent 72%);
+          filter:blur(4px); transform:translate(-50%,-50%) scale(.72); will-change:transform; }
+        .ring-svg{ width:calc(var(--disc)*1.58); aspect-ratio:1; }
         .disc{ width:var(--disc); aspect-ratio:1; border-radius:50%;
           background:
             radial-gradient(circle at 50% 28%, rgba(255,255,255,.10), transparent 46%),
@@ -320,14 +357,15 @@ export default function Pacer() {
           box-shadow:
             0 0 18px rgba(165,240,205,.6), 0 0 60px rgba(165,240,205,.25),
             inset 0 0 26px rgba(165,240,205,.5), inset 0 16px 34px rgba(255,255,255,.05);
-          transition:transform .12s linear; will-change:transform; }
+          transform:translate(-50%,-50%) scale(.72); will-change:transform; }
         .center{ position:absolute; inset:0; display:flex; flex-direction:column;
-          align-items:center; justify-content:center; pointer-events:none; text-align:center; }
+          align-items:center; justify-content:center; pointer-events:none; text-align:center;
+          transform:translateY(calc(var(--disc)*0.045)); }
         .phase{ font-family:'Fraunces',serif; font-weight:500;
-          font-size:clamp(26px, calc(var(--disc)*0.24), 40px);
+          font-size:clamp(26px, calc(var(--disc)*0.22), 44px);
           text-transform:uppercase; letter-spacing:.06em; color:#F6F3ED; line-height:1;
           text-shadow:0 2px 18px rgba(0,0,0,.35); }
-        .count{ font-size:14px; color:#CBD3DC; margin-top:10px; letter-spacing:.14em; }
+        .count{ font-size:14px; color:#CBD3DC; margin-top:11px; letter-spacing:.14em; }
         .done-txt{ font-family:'Fraunces',serif; font-size:28px; letter-spacing:.08em;
           text-transform:uppercase; color:var(--mint); }
         .panel{ width:100%; max-width:440px; background:rgba(52,59,73,.88);
@@ -376,22 +414,14 @@ export default function Pacer() {
         }
         @media (max-height:640px){
           .sub{ display:none; }
-          .modes-group{ margin-bottom:5px; }
         }
       `}</style>
 
-      <div role="group" aria-label="Modos de respiración"
-        style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+      <div className="modes-scroll" role="group" aria-label="Modos de respiración">
         <div className="modes-group">
-          {MODES.slice(0, 4).map((m) => (
+          {MODES.map((m) => (
             <button key={m.id} className="mode-btn" aria-pressed={m.id === modeId}
-              onClick={() => setModeId(m.id)}>{m.name}</button>
-          ))}
-        </div>
-        <div className="modes-group" style={{ marginBottom: 0 }}>
-          {MODES.slice(4).map((m) => (
-            <button key={m.id} className="mode-btn" aria-pressed={m.id === modeId}
-              onClick={() => setModeId(m.id)}>{m.name}</button>
+              onClick={(ev) => pickMode(m, ev)}>{m.name}</button>
           ))}
         </div>
       </div>
@@ -401,16 +431,15 @@ export default function Pacer() {
         <svg className="wave layer" viewBox="0 0 684 200" aria-hidden="true">
           <path d={WAVE_PATH} fill="none" stroke="#8A93A3" strokeWidth="1.6" />
         </svg>
-        <div className="halo layer" style={{ transform: `translate(-50%,-50%) scale(${scale})` }} />
+        <div ref={haloEl} className="halo layer" />
         <svg className="ring-svg layer" viewBox="0 0 400 400" aria-hidden="true">
           <circle cx="200" cy="200" r={R} fill="none" stroke="var(--line)" strokeWidth="1.5" />
-          <circle cx="200" cy="200" r={R} fill="none" stroke="var(--mint)" strokeWidth="2"
-            strokeLinecap="round" strokeDasharray={CIRC}
-            strokeDashoffset={CIRC * (1 - phaseProg)}
+          <circle ref={arcEl} cx="200" cy="200" r={R} fill="none" stroke="var(--mint)" strokeWidth="2"
+            strokeLinecap="round" strokeDasharray={CIRC} strokeDashoffset={CIRC}
             transform="rotate(-90 200 200)"
-            style={{ transition: "stroke-dashoffset .12s linear", opacity: running ? 0.5 : 0 }} />
+            style={{ opacity: running ? 0.5 : 0, transition: "opacity .3s" }} />
         </svg>
-        <div className="disc layer" style={{ transform: `translate(-50%,-50%) scale(${scale})` }} />
+        <div ref={discEl} className="disc layer" />
         <div className="center">
           {done ? (
             <div className="done-txt">Listo</div>
@@ -494,7 +523,7 @@ export default function Pacer() {
       )}
       {installHint === "android" && (
         <div className="install">
-          <button className="cta" onClick={async () => { installEvt?.prompt(); dismissHint(); }}>
+          <button className="cta" onClick={() => { installEvt?.prompt(); dismissHint(); }}>
             INSTALAR APP
           </button>
           <button className="dismiss" onClick={dismissHint} aria-label="Cerrar aviso">✕</button>
