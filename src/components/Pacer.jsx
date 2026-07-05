@@ -130,6 +130,24 @@ export default function Pacer() {
     reduced.current = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches ?? false;
   }, []);
 
+  // — alto real del viewport medido por JS: iOS standalone a veces reporta
+  //   mal dvh/fixed y deja una banda muerta abajo; visualViewport no miente —
+  useEffect(() => {
+    const setVvh = () => {
+      const h = window.visualViewport?.height ?? window.innerHeight;
+      document.documentElement.style.setProperty("--vvh", `${Math.round(h)}px`);
+    };
+    setVvh();
+    window.visualViewport?.addEventListener("resize", setVvh);
+    window.addEventListener("resize", setVvh);
+    window.addEventListener("orientationchange", setVvh);
+    return () => {
+      window.visualViewport?.removeEventListener("resize", setVvh);
+      window.removeEventListener("resize", setVvh);
+      window.removeEventListener("orientationchange", setVvh);
+    };
+  }, []);
+
   useEffect(() => { lsSet("breath-mode", modeId); }, [modeId]);
   useEffect(() => { lsSet("breath-muted", muted ? "1" : "0"); }, [muted]);
   useEffect(() => { lsSet("breath-vol", String(volume)); }, [volume]);
@@ -383,7 +401,8 @@ export default function Pacer() {
           --bg-0:#2A303C; --bg-1:#232833; --panel:#343B49; --pill:#3A4150;
           --mint:#A9EFD2; --mint-deep:#7FD8B8; --ink:#14241D;
           --txt:#EFF2F5; --muted:#A0A8B6; --line:rgba(255,255,255,.08);
-          position:fixed; inset:0; overflow:hidden;
+          position:fixed; top:0; left:0; width:100%;
+          height:var(--vvh, 100dvh); overflow:hidden;
           display:flex; flex-direction:column; align-items:center;
           background:linear-gradient(180deg,var(--bg-0),var(--bg-1) 55%,#20242E);
           color:var(--txt); font-family:'Space Mono',ui-monospace,monospace;
@@ -414,7 +433,7 @@ export default function Pacer() {
           margin:10px 0 0; text-align:center; min-height:18px;
           animation:phaseIn .35s ease-out both; }
         .stage{ position:relative; width:100%; flex:1; min-height:0;
-          --disc:min(340px, 44dvh, 76vw);
+          --disc:min(340px, calc(var(--vvh, 100dvh) * 0.44), 76vw);
           display:block; border:none; background:none; padding:0; margin:0;
           font:inherit; color:inherit; cursor:pointer;
           -webkit-appearance:none; appearance:none; }
@@ -463,17 +482,20 @@ export default function Pacer() {
         .icon-col:focus-visible{ outline:2px solid var(--mint); outline-offset:3px; border-radius:10px; }
         .icon-circle{ width:44px; height:44px; border-radius:50%; background:#3A4150;
           display:grid; place-items:center; transition:background .2s; }
-        .meta-inline{ display:flex; gap:clamp(14px,6vw,34px); justify-content:center; }
-        .meta-inline .cell{ display:flex; flex-direction:column; align-items:center; gap:3px; }
-        .meta-inline .lbl{ font-size:9.5px; letter-spacing:.14em; color:#8D96A5; text-transform:uppercase; }
-        .meta-inline .val{ font-size:13.5px; color:var(--txt); font-weight:700; white-space:nowrap; }
+        .metrics{ display:flex; justify-content:center; gap:clamp(20px,8vw,42px);
+          margin-top:11px; padding-top:10px; border-top:1px solid rgba(255,255,255,.07); }
+        .m-lbl{ font-size:10px; letter-spacing:.16em; color:#8D96A5;
+          text-transform:uppercase; white-space:nowrap; }
+        .m-lbl b{ font-size:13.5px; color:var(--txt); font-weight:700;
+          letter-spacing:.02em; margin-left:7px; text-transform:none; }
         .sound-block{ display:flex; flex-direction:column; align-items:center; gap:5px; }
         .sound-row{ display:flex; align-items:center; gap:5px; }
         .sound-btn{ background:none; border:none; color:#E8ECF0; cursor:pointer; padding:2px;
           display:grid; place-items:center; }
         .sound-btn:focus-visible{ outline:2px solid var(--mint); outline-offset:2px; border-radius:6px; }
         .sound-row input[type=range]{ -webkit-appearance:none; appearance:none;
-          width:56px; height:18px; background:transparent; cursor:pointer; }
+          width:70px; max-width:70px; flex:0 0 auto; height:18px;
+          background:transparent; cursor:pointer; }
         .sound-row input[type=range]::-webkit-slider-runnable-track{
           height:3px; border-radius:2px; background:#4A5262; }
         .sound-row input[type=range]::-webkit-slider-thumb{ -webkit-appearance:none;
@@ -503,9 +525,9 @@ export default function Pacer() {
           .mode-btn{ font-size:15px; padding:10px 17px; }
           .sub{ font-size:14px; margin-top:14px; }
           .count{ font-size:15px; }
-          .panel{ padding:15px 20px; border-radius:26px; }
+          .panel{ padding:15px 20px 13px; border-radius:26px; }
           .icon-circle{ width:48px; height:48px; }
-          .meta-inline .val{ font-size:14.5px; }
+          .m-lbl b{ font-size:14.5px; }
           .wave{ opacity:.42; }
         }
       `}</style>
@@ -565,17 +587,6 @@ export default function Pacer() {
             REINICIAR
           </button>
 
-          <div className="meta-inline">
-            <div className="cell">
-              <span className="lbl">Ritmo</span>
-              <span className="val">{ratioSlash}</span>
-            </div>
-            <div className="cell">
-              <span className="lbl">Restante</span>
-              <span className="val">{fmt(remaining ?? mode.defaultMin * 60)}</span>
-            </div>
-          </div>
-
           <div className="sound-block">
             <div className="sound-row">
               <button className="sound-btn"
@@ -609,6 +620,11 @@ export default function Pacer() {
             </div>
             <span className="sound-label">SONIDO</span>
           </div>
+        </div>
+
+        <div className="metrics">
+          <span className="m-lbl">Ritmo <b>{ratioSlash}</b></span>
+          <span className="m-lbl">Restante <b>{fmt(remaining ?? mode.defaultMin * 60)}</b></span>
         </div>
       </div>
 
