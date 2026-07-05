@@ -32,7 +32,11 @@ npm run icons
 ## Roadmap
 
 - [x] PWA instalable (manifest + service worker vía `vite-plugin-pwa`)
-- [ ] Vibration API en Android/Chrome para pulso háptico por fase
-- [ ] Persistir modo/sonido elegido (localStorage)
+- [x] Persistir modo/sonido elegido (localStorage)
+- [x] Audio en segundo plano: beeps agendados en el reloj de WebAudio +
+      sesión de audio activa, siguen sonando con la pantalla bloqueada
+- [x] Media Session: metadata y play/pausa en el lock screen
+- [x] Final suave: últimas respiraciones con fade + campanita
 - [ ] App companion nativa para Apple Watch (Swift + WatchConnectivity) —
-      proyecto separado, watchOS no corre contenido web
+      proyecto separado, watchOS no corre contenido web; único camino
+      para hápticos con pantalla apagada

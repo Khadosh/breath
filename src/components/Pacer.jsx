@@ -66,6 +66,7 @@ const fmt = (s) => {
 };
 const kindOf = (key) =>
   key.startsWith("inhale") ? "inhale" : key.startsWith("exhale") ? "exhale" : "hold";
+const FREQ = { inhale: 396, exhale: 264, hold: 330 };
 
 // escala del disco para una fase y su progreso (0..1)
 const scaleFor = (key, prog, reducedMotion) => {
@@ -224,10 +225,11 @@ export default function Pacer() {
   }, []);
 
   // curva de potencia: el oído percibe el volumen logarítmico, así el slider
-  // se siente lineal en vez de "no hacer nada" hasta el final
+  // se siente lineal en vez de "no hacer nada" hasta el final. El mute vive
+  // acá también, para que silencie los beeps ya agendados a futuro.
   useEffect(() => {
-    if (masterGain.current) masterGain.current.gain.value = Math.pow(volume, 1.5);
-  }, [volume]);
+    if (masterGain.current) masterGain.current.gain.value = muted ? 0 : Math.pow(volume, 1.5);
+  }, [volume, muted]);
 
   const unlockPlayback = useCallback(() => {
     try {
@@ -245,23 +247,90 @@ export default function Pacer() {
     silentEl.current?.pause();
   }, []);
 
+  // — tono agendado en el reloj de WebAudio (sample-accurate): los osciladores
+  //   ya programados suenan aunque la pantalla se bloquee —
+  const sched = useRef({ timer: 0, lastT: 0, bellDone: false, bounds: [], cycleMs: 0, sources: [] });
+
+  const toneAt = useCallback((ctxTime, freq, peak, dur = 0.5) => {
+    const ctx = audioCtx.current;
+    if (!ctx || !masterGain.current) return;
+    try {
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = "sine";
+      o.frequency.value = freq;
+      const t = Math.max(ctxTime, ctx.currentTime + 0.01);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(peak, t + 0.04);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g).connect(masterGain.current);
+      o.start(t);
+      o.stop(t + dur + 0.05);
+      sched.current.sources.push({ o, g, until: t + dur });
+    } catch { /* sin audio, seguimos */ }
+  }, []);
+
+  const bellAt = useCallback((ctxTime) => {
+    // campanita: parciales con caída larga
+    toneAt(ctxTime, 523.25, 0.28, 3.2);
+    toneAt(ctxTime, 1046.5, 0.11, 2.2);
+    toneAt(ctxTime, 1567.98, 0.05, 1.4);
+  }, [toneAt]);
+
+  const clearScheduled = useCallback(() => {
+    clearInterval(sched.current.timer);
+    sched.current.timer = 0;
+    for (const s of sched.current.sources) {
+      try { s.o.stop(0); s.o.disconnect(); s.g.disconnect(); } catch { /* ya sonó */ }
+    }
+    sched.current.sources = [];
+  }, []);
+
+  // agenda los beeps de los próximos 5s; corre cada 1s (los timers siguen vivos
+  // en segundo plano mientras haya audio activo, y el margen cubre el jitter)
+  const runScheduler = useCallback(() => {
+    const ctx = audioCtx.current;
+    if (!ctx || !runningRef.current) return;
+    const s = sched.current;
+    const nowPn = performance.now();
+    const horizon = nowPn + 5000;
+
+    // limpiar fuentes ya sonadas
+    s.sources = s.sources.filter((x) => x.until > ctx.currentTime - 1);
+
+    let t = Math.max(s.lastT, nowPn);
+    for (;;) {
+      // próximo límite de fase después de t
+      let next = null;
+      const n = Math.floor((t - cycleT0.current) / s.cycleMs);
+      outer: for (let k = n; k <= n + 2; k++) {
+        for (const b of s.bounds) {
+          const bt = cycleT0.current + k * s.cycleMs + b.at;
+          if (bt > t) { next = { bt, key: b.key }; break outer; }
+        }
+      }
+      if (!next || next.bt >= horizon || next.bt >= sessionEnd.current) break;
+      const leftMs = sessionEnd.current - next.bt;
+      // las últimas respiraciones se van apagando
+      const fade = leftMs < s.cycleMs * 0.5 ? 0.3 : leftMs < s.cycleMs ? 0.55 : 1;
+      toneAt(ctx.currentTime + (next.bt - nowPn) / 1000, FREQ[kindOf(next.key)], 0.3 * fade);
+      t = next.bt;
+    }
+    s.lastT = t;
+
+    if (!s.bellDone && sessionEnd.current > nowPn && sessionEnd.current < horizon) {
+      bellAt(ctx.currentTime + (sessionEnd.current - nowPn) / 1000);
+      s.bellDone = true;
+    }
+  }, [toneAt, bellAt]);
+
   const beep = useCallback((kind) => {
     if (mutedRef.current || volRef.current <= 0 || document.hidden) return;
     try {
       const ctx = ensureCtx();
-      const o = ctx.createOscillator();
-      const g = ctx.createGain();
-      const freq = kind === "inhale" ? 396 : kind === "exhale" ? 264 : 330;
-      o.frequency.value = freq;
-      o.type = "sine";
-      g.gain.setValueAtTime(0.0001, ctx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + 0.04);
-      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5);
-      o.connect(g).connect(masterGain.current);
-      o.start();
-      o.stop(ctx.currentTime + 0.5);
+      toneAt(ctx.currentTime, FREQ[kind] ?? FREQ.hold, 0.3);
     } catch { /* sin audio, seguimos */ }
-  }, [ensureCtx]);
+  }, [ensureCtx, toneAt]);
 
   // — wake lock: que la pantalla no se apague durante la sesión —
   const acquireWake = useCallback(async () => {
@@ -280,8 +349,9 @@ export default function Pacer() {
     runningRef.current = false;
     setRunning(false);
     releaseWake();
+    clearScheduled();
     stopPlaybackSession();
-  }, [cycleMs, releaseWake, stopPlaybackSession]);
+  }, [cycleMs, releaseWake, stopPlaybackSession, clearScheduled]);
 
   const reset = useCallback(() => {
     stop();
@@ -312,6 +382,38 @@ export default function Pacer() {
     ensureCtx();
     beep(kindOf(mode.phases[idxRef.current].key));
 
+    // scheduler de audio: límites de fase del ciclo + sesión
+    const bounds = [];
+    let accMs = 0;
+    for (const p of mode.phases) {
+      bounds.push({ at: accMs, key: p.key });
+      accMs += p.secs * 1000;
+    }
+    sched.current.bounds = bounds;
+    sched.current.cycleMs = cycleMs;
+    sched.current.lastT = now;
+    sched.current.bellDone = false;
+    runScheduler();
+    clearInterval(sched.current.timer);
+    sched.current.timer = setInterval(runScheduler, 1000);
+
+    // lock screen: metadata + play/pausa
+    try {
+      if ("mediaSession" in navigator) {
+        navigator.mediaSession.metadata = new window.MediaMetadata({
+          title: `Breath — ${mode.name}`,
+          artist: mode.sub,
+          artwork: [{ src: "/icons/icon-512.png", sizes: "512x512", type: "image/png" }],
+        });
+        navigator.mediaSession.setActionHandler("play", () => {
+          if (!runningRef.current) startRef.current?.();
+        });
+        navigator.mediaSession.setActionHandler("pause", () => {
+          if (runningRef.current) stopRef.current?.();
+        });
+      }
+    } catch { /* sin media session */ }
+
     const phaseAt = (msInCycle) => {
       let acc = 0;
       for (let i = 0; i < mode.phases.length; i++) {
@@ -327,8 +429,7 @@ export default function Pacer() {
       const { i, prog } = phaseAt(cyc);
       if (i !== idxRef.current) {
         idxRef.current = i;
-        setPhaseIdx(i);
-        beep(kindOf(mode.phases[i].key));
+        setPhaseIdx(i); // el beep del cambio de fase ya está agendado en WebAudio
       }
       applyScale(scaleFor(mode.phases[i].key, prog, reduced.current));
       applyProg(prog);
@@ -346,8 +447,10 @@ export default function Pacer() {
         setDone(true);
         cycleOffset.current = 0;
         releaseWake();
-        beep("exhale");
-        stopPlaybackSession();
+        clearInterval(sched.current.timer);
+        // la campanita ya está agendada: mantener viva la sesión de audio
+        // hasta que termine de sonar, recién ahí soltarla
+        setTimeout(() => { if (!runningRef.current) stopPlaybackSession(); }, 4500);
         applyScale(scaleFor("inhale", 0, reduced.current));
         applyProg(0);
         return;
@@ -356,11 +459,28 @@ export default function Pacer() {
     };
     raf.current = requestAnimationFrame(tick);
   }, [mode, remaining, done, reset, beep, cycleMs, acquireWake, releaseWake, applyScale, applyProg,
-    unlockPlayback, ensureCtx, stopPlaybackSession]);
+    unlockPlayback, ensureCtx, stopPlaybackSession, runScheduler]);
+
+  // refs estables para los handlers del lock screen
+  const startRef = useRef(null);
+  const stopRef = useRef(null);
+  useEffect(() => { startRef.current = start; stopRef.current = stop; });
+
+  useEffect(() => {
+    try {
+      if ("mediaSession" in navigator) {
+        navigator.mediaSession.playbackState = running ? "playing" : "paused";
+      }
+    } catch { /* sin media session */ }
+  }, [running]);
 
   const toggle = useCallback(() => { if (running) stop(); else start(); }, [running, stop, start]);
 
-  useEffect(() => () => { cancelAnimationFrame(raf.current); releaseWake(); }, [releaseWake]);
+  useEffect(() => () => {
+    cancelAnimationFrame(raf.current);
+    releaseWake();
+    clearScheduled();
+  }, [releaseWake, clearScheduled]);
 
   // — el wake lock se pierde al ir a segundo plano: re-adquirir al volver —
   useEffect(() => {
