@@ -98,6 +98,11 @@ const isStandalone = () =>
 const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* sin persistencia */ } };
 
+// wav silencioso de 1 sample: reproducirlo en loop promueve la sesión de audio
+// de iOS a "playback", y así los beeps suenan aunque el switch esté en silencio
+const SILENT_WAV =
+  "data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA";
+
 export default function Pacer() {
   const [modeId, setModeId] = useState(() => {
     const s = lsGet("breath-mode");
@@ -186,25 +191,59 @@ export default function Pacer() {
     if (arcEl.current) arcEl.current.style.strokeDashoffset = `${CIRC * (1 - p)}`;
   }, []);
 
+  const masterGain = useRef(null);
+  const silentEl = useRef(null);
+
+  const ensureCtx = useCallback(() => {
+    if (!audioCtx.current) {
+      audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
+      masterGain.current = audioCtx.current.createGain();
+      masterGain.current.gain.value = Math.pow(volRef.current, 1.5);
+      masterGain.current.connect(audioCtx.current.destination);
+    }
+    if (audioCtx.current.state === "suspended") audioCtx.current.resume();
+    return audioCtx.current;
+  }, []);
+
+  // curva de potencia: el oído percibe el volumen logarítmico, así el slider
+  // se siente lineal en vez de "no hacer nada" hasta el final
+  useEffect(() => {
+    if (masterGain.current) masterGain.current.gain.value = Math.pow(volume, 1.5);
+  }, [volume]);
+
+  const unlockPlayback = useCallback(() => {
+    try {
+      if (!silentEl.current) {
+        const a = new Audio(SILENT_WAV);
+        a.loop = true;
+        a.setAttribute("playsinline", "");
+        a.volume = 0.001;
+        silentEl.current = a;
+      }
+      silentEl.current.play().catch(() => { /* sin gesto todavía */ });
+    } catch { /* sin audio, seguimos */ }
+  }, []);
+  const stopPlaybackSession = useCallback(() => {
+    silentEl.current?.pause();
+  }, []);
+
   const beep = useCallback((kind) => {
     if (mutedRef.current || volRef.current <= 0 || document.hidden) return;
     try {
-      if (!audioCtx.current) audioCtx.current = new (window.AudioContext || window.webkitAudioContext)();
-      const ctx = audioCtx.current;
-      if (ctx.state === "suspended") ctx.resume();
+      const ctx = ensureCtx();
       const o = ctx.createOscillator();
       const g = ctx.createGain();
       const freq = kind === "inhale" ? 396 : kind === "exhale" ? 264 : 330;
       o.frequency.value = freq;
       o.type = "sine";
       g.gain.setValueAtTime(0.0001, ctx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.25 * volRef.current, ctx.currentTime + 0.04);
+      g.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + 0.04);
       g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.5);
-      o.connect(g).connect(ctx.destination);
+      o.connect(g).connect(masterGain.current);
       o.start();
       o.stop(ctx.currentTime + 0.5);
     } catch { /* sin audio, seguimos */ }
-  }, []);
+  }, [ensureCtx]);
 
   // — wake lock: que la pantalla no se apague durante la sesión —
   const acquireWake = useCallback(async () => {
@@ -223,7 +262,8 @@ export default function Pacer() {
     runningRef.current = false;
     setRunning(false);
     releaseWake();
-  }, [cycleMs, releaseWake]);
+    stopPlaybackSession();
+  }, [cycleMs, releaseWake, stopPlaybackSession]);
 
   const reset = useCallback(() => {
     stop();
@@ -250,6 +290,8 @@ export default function Pacer() {
     setRunning(true);
     setDone(false);
     acquireWake();
+    unlockPlayback();
+    ensureCtx();
     beep(kindOf(mode.phases[idxRef.current].key));
 
     const phaseAt = (msInCycle) => {
@@ -287,6 +329,7 @@ export default function Pacer() {
         cycleOffset.current = 0;
         releaseWake();
         beep("exhale");
+        stopPlaybackSession();
         applyScale(scaleFor("inhale", 0, reduced.current));
         applyProg(0);
         return;
@@ -294,7 +337,8 @@ export default function Pacer() {
       raf.current = requestAnimationFrame(tick);
     };
     raf.current = requestAnimationFrame(tick);
-  }, [mode, remaining, done, reset, beep, cycleMs, acquireWake, releaseWake, applyScale, applyProg]);
+  }, [mode, remaining, done, reset, beep, cycleMs, acquireWake, releaseWake, applyScale, applyProg,
+    unlockPlayback, ensureCtx, stopPlaybackSession]);
 
   const toggle = useCallback(() => { if (running) stop(); else start(); }, [running, stop, start]);
 
@@ -334,7 +378,7 @@ export default function Pacer() {
           --bg-0:#2A303C; --bg-1:#232833; --panel:#343B49; --pill:#3A4150;
           --mint:#A9EFD2; --mint-deep:#7FD8B8; --ink:#14241D;
           --txt:#EFF2F5; --muted:#A0A8B6; --line:rgba(255,255,255,.08);
-          height:100dvh; width:100%; overflow:hidden; position:relative;
+          position:fixed; inset:0; overflow:hidden;
           display:flex; flex-direction:column; align-items:center;
           background:linear-gradient(180deg,var(--bg-0),var(--bg-1) 55%,#20242E);
           color:var(--txt); font-family:'Space Mono',ui-monospace,monospace;
@@ -352,7 +396,8 @@ export default function Pacer() {
         .mode-btn{
           background:transparent; border:none; color:#A9B1BF; white-space:nowrap;
           font-family:inherit; font-size:14px; letter-spacing:.02em;
-          padding:8px 15px; border-radius:999px; cursor:pointer; transition:color .2s;
+          padding:8px 15px; border-radius:999px; cursor:pointer;
+          transition:color .25s, background .3s, box-shadow .3s;
         }
         .mode-btn:hover{ color:var(--txt); }
         .mode-btn[aria-pressed="true"]{
@@ -361,7 +406,8 @@ export default function Pacer() {
         }
         .mode-btn:focus-visible{ outline:2px solid var(--mint); outline-offset:2px; }
         .sub{ font-size:13px; color:#CBD8D2; letter-spacing:.02em;
-          margin:10px 0 0; text-align:center; min-height:18px; }
+          margin:10px 0 0; text-align:center; min-height:18px;
+          animation:phaseIn .35s ease-out both; }
         .stage{ position:relative; width:100%; flex:1; min-height:0;
           --disc:min(340px, 44dvh, 76vw); }
         .layer{ position:absolute; top:50%; left:50%;
@@ -370,6 +416,7 @@ export default function Pacer() {
         .halo{ width:calc(var(--disc)*1.5); aspect-ratio:1; border-radius:50%;
           background:radial-gradient(circle, rgba(214,112,60,.44), rgba(214,112,60,.14) 48%, transparent 72%);
           filter:blur(4px); transform:translate(-50%,-50%) scale(.72); will-change:transform; }
+        .halo.idle,.disc.idle{ transition:transform .5s ease; }
         .ring-svg{ width:calc(var(--disc)*1.58); aspect-ratio:1; }
         .disc{ width:var(--disc); aspect-ratio:1; border-radius:50%;
           background:
@@ -391,7 +438,7 @@ export default function Pacer() {
         @keyframes phaseIn{ from{ opacity:0; } to{ opacity:1; } }
         .count{ font-size:14px; color:#CBD3DC; margin-top:11px; letter-spacing:.14em; }
         .done-txt{ font-family:'Fraunces',serif; font-size:28px; letter-spacing:.08em;
-          text-transform:uppercase; color:var(--mint); }
+          text-transform:uppercase; color:var(--mint); animation:phaseIn .5s ease-out both; }
         .panel{ width:100%; max-width:440px; background:rgba(52,59,73,.88);
           border-radius:24px; padding:13px 15px 9px; margin-top:6px;
           box-shadow:0 12px 34px rgba(0,0,0,.28); }
@@ -472,13 +519,13 @@ export default function Pacer() {
           ))}
         </div>
       </div>
-      <div className="sub">{mode.sub}</div>
+      <div className="sub" key={modeId}>{mode.sub}</div>
 
       <div className="stage">
         <svg className="wave layer" viewBox="0 0 684 200" aria-hidden="true">
           <path d={WAVE_PATH} fill="none" stroke="#8A93A3" strokeWidth="1.6" />
         </svg>
-        <div ref={haloEl} className="halo layer" />
+        <div ref={haloEl} className={`halo layer${running ? "" : " idle"}`} />
         <svg className="ring-svg layer" viewBox="0 0 400 400" aria-hidden="true">
           <circle cx="200" cy="200" r={R} fill="none" stroke="var(--line)" strokeWidth="1.5" />
           <circle ref={arcEl} cx="200" cy="200" r={R} fill="none" stroke="var(--mint)" strokeWidth="2"
@@ -486,7 +533,7 @@ export default function Pacer() {
             transform="rotate(-90 200 200)"
             style={{ opacity: running ? 0.5 : 0, transition: "opacity .3s" }} />
         </svg>
-        <div ref={discEl} className="disc layer" />
+        <div ref={discEl} className={`disc layer${running ? "" : " idle"}`} />
         <div className="center">
           {done ? (
             <div className="done-txt">Listo</div>
@@ -529,7 +576,12 @@ export default function Pacer() {
           <div className="sound-block">
             <span className="sound-title">Ajustes de Sonido</span>
             <div className="sound-row">
-              <button className="sound-btn" onClick={() => setMuted((m) => !m)}
+              <button className="sound-btn"
+                onClick={() => setMuted((m) => {
+                  const next = !m;
+                  if (!next) setTimeout(() => { unlockPlayback(); beep("inhale"); }, 0);
+                  return next;
+                })}
                 aria-pressed={muted} aria-label={muted ? "Activar sonido" : "Silenciar"}>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
                   stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -549,7 +601,9 @@ export default function Pacer() {
               </button>
               <input type="range" min="0" max="1" step="0.05" value={volume}
                 aria-label="Volumen"
-                onChange={(ev) => setVolume(parseFloat(ev.target.value))} />
+                onChange={(ev) => setVolume(parseFloat(ev.target.value))}
+                onPointerUp={() => { unlockPlayback(); beep("inhale"); }}
+                onKeyUp={() => beep("inhale")} />
             </div>
             <span className="sound-label">SONIDO</span>
             <span className="sparkle" aria-hidden="true">✦</span>
