@@ -355,7 +355,11 @@ export default function Pacer() {
 
   useEffect(() => {
     const onKey = (e) => {
-      if (e.code === "Space" && e.target.tagName !== "INPUT") { e.preventDefault(); toggle(); }
+      // botones e inputs ya manejan Space nativamente (evita doble toggle)
+      if (e.code === "Space" && !["INPUT", "BUTTON"].includes(e.target.tagName)) {
+        e.preventDefault();
+        toggle();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -363,6 +367,7 @@ export default function Pacer() {
 
   const ratioDots = mode.phases.map((p) => `${p.secs}s`).join(" · ");
   const ratioSlash = mode.phases.map((p) => `${p.secs}s`).join(" / ");
+  const paused = !running && !done && remaining != null && remaining < mode.defaultMin * 60;
 
 
   const pickMode = (m, ev) => {
@@ -409,7 +414,15 @@ export default function Pacer() {
           margin:10px 0 0; text-align:center; min-height:18px;
           animation:phaseIn .35s ease-out both; }
         .stage{ position:relative; width:100%; flex:1; min-height:0;
-          --disc:min(340px, 44dvh, 76vw); }
+          --disc:min(340px, 44dvh, 76vw);
+          display:block; border:none; background:none; padding:0; margin:0;
+          font:inherit; color:inherit; cursor:pointer;
+          -webkit-appearance:none; appearance:none; }
+        .stage:focus-visible{ outline:2px solid var(--mint); outline-offset:-3px; border-radius:24px; }
+        .hint{ font-size:10.5px; letter-spacing:.2em; text-transform:uppercase;
+          color:#8D96A5; margin-top:12px; animation:hintPulse 2.6s ease-in-out infinite; }
+        @keyframes hintPulse{ 0%,100%{ opacity:.5; } 50%{ opacity:1; } }
+        @media (prefers-reduced-motion: reduce){ .hint{ animation:none; } }
         .layer{ position:absolute; top:50%; left:50%;
           transform:translate(-50%,-50%); pointer-events:none; }
         .wave{ width:684px; height:200px; opacity:.38; }
@@ -440,7 +453,7 @@ export default function Pacer() {
         .done-txt{ font-family:'Fraunces',serif; font-size:28px; letter-spacing:.08em;
           text-transform:uppercase; color:var(--mint); animation:phaseIn .5s ease-out both; }
         .panel{ width:100%; max-width:440px; background:rgba(52,59,73,.88);
-          border-radius:24px; padding:13px 15px 9px; margin-top:6px;
+          border-radius:24px; padding:12px 18px; margin-top:6px;
           box-shadow:0 12px 34px rgba(0,0,0,.28); }
         .panel-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
         .icon-col{ display:flex; flex-direction:column; align-items:center; gap:6px;
@@ -450,17 +463,11 @@ export default function Pacer() {
         .icon-col:focus-visible{ outline:2px solid var(--mint); outline-offset:3px; border-radius:10px; }
         .icon-circle{ width:44px; height:44px; border-radius:50%; background:#3A4150;
           display:grid; place-items:center; transition:background .2s; }
-        .play{ display:flex; align-items:center; justify-content:center; gap:8px;
-          font-family:inherit; font-weight:700; font-size:clamp(11px,3.2vw,14px);
-          letter-spacing:.04em; color:var(--ink); border:none; border-radius:999px;
-          background:linear-gradient(180deg,#C4F8E1,#8FE7C4);
-          padding:16px 14px; flex:1; max-width:238px; cursor:pointer; white-space:nowrap;
-          box-shadow:0 6px 24px rgba(150,240,200,.35); transition:transform .12s ease; }
-        .play:hover{ transform:translateY(-1px); }
-        .play:focus-visible{ outline:2px solid var(--mint); outline-offset:3px; }
-        .sound-block{ display:flex; flex-direction:column; align-items:center; gap:4px; }
-        .sound-title{ font-size:10px; color:#A9B1BF; letter-spacing:.02em;
-          text-align:center; max-width:90px; line-height:1.3; }
+        .meta-inline{ display:flex; gap:clamp(14px,6vw,34px); justify-content:center; }
+        .meta-inline .cell{ display:flex; flex-direction:column; align-items:center; gap:3px; }
+        .meta-inline .lbl{ font-size:9.5px; letter-spacing:.14em; color:#8D96A5; text-transform:uppercase; }
+        .meta-inline .val{ font-size:13.5px; color:var(--txt); font-weight:700; white-space:nowrap; }
+        .sound-block{ display:flex; flex-direction:column; align-items:center; gap:5px; }
         .sound-row{ display:flex; align-items:center; gap:5px; }
         .sound-btn{ background:none; border:none; color:#E8ECF0; cursor:pointer; padding:2px;
           display:grid; place-items:center; }
@@ -478,13 +485,6 @@ export default function Pacer() {
           width:11px; height:11px; border:none; border-radius:50%; background:var(--mint-deep);
           box-shadow:0 0 6px rgba(160,235,200,.45); }
         .sound-label{ font-size:10.5px; letter-spacing:.14em; color:#C7CDD6; }
-        .sparkle{ color:var(--mint); font-size:12px; line-height:1; opacity:.85; }
-        .meta{ display:flex; justify-content:space-between; align-items:flex-end;
-          margin-top:12px; padding:0 5px; }
-        .meta .cell{ display:flex; flex-direction:column; gap:3px; }
-        .meta .cell:last-child{ align-items:flex-end; }
-        .meta .lbl{ font-size:9.5px; letter-spacing:.12em; color:#8D96A5; text-transform:uppercase; }
-        .meta .val{ font-size:13.5px; color:var(--txt); font-weight:700; white-space:nowrap; }
         .install{ display:flex; align-items:center; gap:9px; margin-top:7px;
           font-size:11px; color:#98A1AF; line-height:1.4; max-width:440px; }
         .install .cta{ font-family:inherit; font-weight:700; font-size:11px; border:none;
@@ -503,10 +503,9 @@ export default function Pacer() {
           .mode-btn{ font-size:15px; padding:10px 17px; }
           .sub{ font-size:14px; margin-top:14px; }
           .count{ font-size:15px; }
-          .panel{ padding:17px 18px 12px; border-radius:26px; }
-          .play{ padding:18px 18px; }
+          .panel{ padding:15px 20px; border-radius:26px; }
           .icon-circle{ width:48px; height:48px; }
-          .meta .val{ font-size:14.5px; }
+          .meta-inline .val{ font-size:14.5px; }
           .wave{ opacity:.42; }
         }
       `}</style>
@@ -521,7 +520,8 @@ export default function Pacer() {
       </div>
       <div className="sub" key={modeId}>{mode.sub}</div>
 
-      <div className="stage">
+      <button className="stage" onClick={toggle}
+        aria-label={running ? "Pausar sesión" : "Comenzar sesión"}>
         <svg className="wave layer" viewBox="0 0 684 200" aria-hidden="true">
           <path d={WAVE_PATH} fill="none" stroke="#8A93A3" strokeWidth="1.6" />
         </svg>
@@ -536,15 +536,21 @@ export default function Pacer() {
         <div ref={discEl} className={`disc layer${running ? "" : " idle"}`} />
         <div className="center">
           {done ? (
-            <div className="done-txt">Listo</div>
+            <>
+              <div className="done-txt">Listo</div>
+              <div className="hint">tocá para otra</div>
+            </>
           ) : (
             <>
               <div className="phase" key={`${phaseIdx}-${phase.label}`}>{phase.label}</div>
               <div className="count">{running ? `${counter}s` : ratioDots}</div>
+              {!running && (
+                <div className="hint">{paused ? "tocá para seguir" : "tocá para empezar"}</div>
+              )}
             </>
           )}
         </div>
-      </div>
+      </button>
 
       <div className="panel">
         <div className="panel-row">
@@ -559,22 +565,18 @@ export default function Pacer() {
             REINICIAR
           </button>
 
-          <button className="play" onClick={toggle}>
-            {running ? (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <rect x="5" y="4" width="5" height="16" rx="1.5" />
-                <rect x="14" y="4" width="5" height="16" rx="1.5" />
-              </svg>
-            ) : (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M7 4.5v15c0 .9 1 1.5 1.8 1l12-7.5c.7-.5.7-1.5 0-2L8.8 3.5C8 3 7 3.6 7 4.5Z" />
-              </svg>
-            )}
-            {running ? "PAUSAR SESIÓN" : done ? "OTRA SESIÓN" : "COMENZAR SESIÓN"}
-          </button>
+          <div className="meta-inline">
+            <div className="cell">
+              <span className="lbl">Ritmo</span>
+              <span className="val">{ratioSlash}</span>
+            </div>
+            <div className="cell">
+              <span className="lbl">Restante</span>
+              <span className="val">{fmt(remaining ?? mode.defaultMin * 60)}</span>
+            </div>
+          </div>
 
           <div className="sound-block">
-            <span className="sound-title">Ajustes de Sonido</span>
             <div className="sound-row">
               <button className="sound-btn"
                 onClick={() => setMuted((m) => {
@@ -606,18 +608,6 @@ export default function Pacer() {
                 onKeyUp={() => beep("inhale")} />
             </div>
             <span className="sound-label">SONIDO</span>
-            <span className="sparkle" aria-hidden="true">✦</span>
-          </div>
-        </div>
-
-        <div className="meta">
-          <div className="cell">
-            <span className="lbl">Ritmo Actual</span>
-            <span className="val">{ratioSlash}</span>
-          </div>
-          <div className="cell">
-            <span className="lbl">Tiempo Restante</span>
-            <span className="val">{fmt(remaining ?? mode.defaultMin * 60)} Min</span>
           </div>
         </div>
       </div>
