@@ -37,6 +37,5 @@ npm run icons
       sesión de audio activa, siguen sonando con la pantalla bloqueada
 - [x] Media Session: metadata y play/pausa en el lock screen
 - [x] Final suave: últimas respiraciones con fade + campanita
-- [ ] App companion nativa para Apple Watch (Swift + WatchConnectivity) —
-      proyecto separado, watchOS no corre contenido web; único camino
-      para hápticos con pantalla apagada
+- [ ] App nativa para Apple Watch — en progreso como proyecto de
+      aprendizaje de Swift: ver [apple/GUIA-SWIFT.md](apple/GUIA-SWIFT.md)
