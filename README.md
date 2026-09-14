@@ -20,6 +20,23 @@ npm run build
 npm run preview
 ```
 
+## Eventos al OS
+
+La app emite sus sesiones a [joaquin.ai](https://github.com/Khadosh/joaquin.ai) (`/api/events`) para
+que el MCP responda "¿cómo me fue con la respiración este mes?" con datos. Sin las variables no emite
+nada y la app no cambia.
+
+```bash
+cp .env.example .env.local   # VITE_OS_URL + VITE_OS_INGEST_TOKEN (el mismo OS_INGEST_TOKEN del shell)
+```
+
+- `session.start` al arrancar de cero (reanudar una pausa no cuenta): `mode`, `planned_s`, `rpm`, `phases`.
+- `session.end` con la campanita (`completed: true`), o al reiniciar, cambiar de modo o cerrar la
+  app (`completed: false`, `duration_s` real). Pausar no cierra la sesión.
+- `session.rate` después de la campanita: una pregunta, un tap (`rating` 1 / 0 / -1). Sin insistir.
+
+El contrato vive en `packages/apps/breath/events.ts` del monorepo; `src/lib/os.js` es la copia en JS.
+
 ## Íconos
 
 Los íconos de la PWA se generan desde `scripts/icon.svg` y

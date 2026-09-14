@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { osSession, newSessionId } from "../lib/os";
 
 // — Modos: cada uno es una secuencia de fases. —
 const MODES = [
@@ -194,6 +195,22 @@ export default function Pacer() {
   volRef.current = volume;
   mutedRef.current = muted;
 
+  // — sesión abierta para el OS: `session.start` emitido, `session.end` pendiente.
+  //   Pausar no la cierra; la cierran el fin natural, reiniciar, cambiar de modo
+  //   o cerrar la app. `rateFor` es la sesión que espera el rating post-campanita —
+  const osSess = useRef(null);
+  const [rateFor, setRateFor] = useState(null);
+
+  const endOsSession = useCallback((completed) => {
+    const s = osSess.current;
+    if (!s) return;
+    osSess.current = null;
+    // lo que duró de verdad: lo planeado menos lo que faltaba (entero, como el contador)
+    const duration_s = completed ? s.planned_s : Math.max(0, s.planned_s - Math.max(0, remainRef.current));
+    if (!completed && duration_s <= 0) return;
+    osSession.end(s.id, { mode: s.mode, planned_s: s.planned_s, duration_s, completed, rpm: s.rpm });
+  }, []);
+
   // — el disco/halo/arco se animan escribiendo el DOM directo desde el rAF:
   //   sin re-render de React por frame ni transition CSS que "corra a alcanzar"
   //   el valor tras un frame salteado (eso causaba el temblor) —
@@ -355,6 +372,8 @@ export default function Pacer() {
 
   const reset = useCallback(() => {
     stop();
+    endOsSession(false);
+    setRateFor(null);
     cycleOffset.current = 0;
     idxRef.current = 0;
     setPhaseIdx(0);
@@ -363,7 +382,7 @@ export default function Pacer() {
     setRemaining(remainRef.current);
     applyScale(scaleFor("inhale", 0, reduced.current));
     applyProg(0);
-  }, [mode, stop, applyScale, applyProg]);
+  }, [mode, stop, applyScale, applyProg, endOsSession]);
 
   useEffect(() => { reset(); /* al cambiar de modo */ // eslint-disable-next-line
   }, [modeId]);
@@ -374,6 +393,16 @@ export default function Pacer() {
     cycleT0.current = now - (done ? 0 : cycleOffset.current);
     const total = done ? mode.defaultMin * 60 : (remaining ?? mode.defaultMin * 60);
     sessionEnd.current = now + total * 1000;
+    if (!osSess.current) {
+      // arranque de cero (reanudar una pausa no emite): una sesión nueva para el OS
+      const rpm = Math.round((60000 / cycleMs) * 100) / 100;
+      osSess.current = { id: newSessionId(), mode: mode.id, planned_s: total, rpm };
+      setRateFor(null);
+      osSession.start(osSess.current.id, {
+        mode: mode.id, planned_s: total, rpm,
+        phases: mode.phases.map((p) => ({ key: p.key, secs: p.secs })),
+      });
+    }
     runningRef.current = true;
     setRunning(true);
     setDone(false);
@@ -445,6 +474,9 @@ export default function Pacer() {
         runningRef.current = false;
         setRunning(false);
         setDone(true);
+        const ended = osSess.current?.id ?? null;
+        endOsSession(true);
+        setRateFor(ended);
         cycleOffset.current = 0;
         releaseWake();
         clearInterval(sched.current.timer);
@@ -459,7 +491,7 @@ export default function Pacer() {
     };
     raf.current = requestAnimationFrame(tick);
   }, [mode, remaining, done, reset, beep, cycleMs, acquireWake, releaseWake, applyScale, applyProg,
-    unlockPlayback, ensureCtx, stopPlaybackSession, runScheduler]);
+    unlockPlayback, ensureCtx, stopPlaybackSession, runScheduler, endOsSession]);
 
   // refs estables para los handlers del lock screen
   const startRef = useRef(null);
@@ -490,6 +522,21 @@ export default function Pacer() {
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
   }, [acquireWake]);
+
+  // — cierre real de la pestaña o la app: cerrar la sesión abierta (fetch keepalive).
+  //   No en visibilitychange: ir a segundo plano con el audio corriendo es uso normal, no un fin —
+  useEffect(() => {
+    const onHide = () => endOsSession(false);
+    window.addEventListener("pagehide", onHide);
+    return () => window.removeEventListener("pagehide", onHide);
+  }, [endOsSession]);
+
+  // una pregunta, un tap. Sin timeout y sin insistir: si no contesta, no hay rating
+  const rate = useCallback((rating) => {
+    if (!rateFor) return;
+    osSession.rate(rateFor, { rating });
+    setRateFor(null);
+  }, [rateFor]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -627,6 +674,15 @@ export default function Pacer() {
           width:11px; height:11px; border:none; border-radius:50%; background:var(--mint-deep);
           box-shadow:0 0 6px rgba(160,235,200,.45); }
         .sound-label{ font-size:10.5px; letter-spacing:.14em; color:#C7CDD6; }
+        .rate{ display:flex; flex-direction:column; align-items:center; gap:8px;
+          margin-top:4px; animation:phaseIn .5s ease-out both; }
+        .rate-q{ font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:#C7CDD6; }
+        .rate-row{ display:flex; gap:8px; }
+        .rate-btn{ font-family:inherit; font-size:12.5px; letter-spacing:.06em; cursor:pointer;
+          background:var(--pill); color:var(--txt); border:1px solid var(--line);
+          border-radius:999px; padding:7px 16px; transition:background .2s, color .2s; }
+        .rate-btn:hover{ background:#454D5E; }
+        .rate-btn:focus-visible{ outline:2px solid var(--mint); outline-offset:2px; }
         .install{ display:flex; align-items:center; gap:9px; margin-top:7px;
           font-size:11px; color:#98A1AF; line-height:1.4; max-width:440px; }
         .install .cta{ font-family:inherit; font-weight:700; font-size:11px; border:none;
@@ -693,6 +749,17 @@ export default function Pacer() {
           )}
         </div>
       </button>
+
+      {done && rateFor && (
+        <div className="rate" role="group" aria-label="¿Más tranquilo que al empezar?">
+          <span className="rate-q">¿Más tranquilo que al empezar?</span>
+          <div className="rate-row">
+            <button className="rate-btn" onClick={() => rate(1)}>Sí</button>
+            <button className="rate-btn" onClick={() => rate(0)}>Igual</button>
+            <button className="rate-btn" onClick={() => rate(-1)}>No</button>
+          </div>
+        </div>
+      )}
 
       <div className="panel">
         <div className="panel-row">
